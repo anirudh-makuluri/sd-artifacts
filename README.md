@@ -17,16 +17,17 @@ The AI reasoning engine uses a state-based workflow (LangGraph) to process repos
 
 ```mermaid
 graph TD
-    Start(("Start")) --> scan["Scanner Node"]
-    scan -->|Error| endNode(("End"))
-    scan -->|Continue| plan["Planner Node"]
+    Start(("Start")) --> scan["Scanner Node\n(Checks Supabase Cache)"]
+    scan -->|Cache Hit| endNode(("End (Return Cache)"))
+    scan -->|Error| endNode
+    scan -->|Cache Miss| plan["Planner Node"]
     
     plan -->|Error| endNode
     plan -->|Continue| build["Dockerfile Generator"]
     
     build --> compose["Compose Generator"]
     compose --> nginx["Nginx Generator"]
-    nginx --> verify["Verifier Node"]
+    nginx --> verify["Verifier Node\n(Saves to Cache)"]
     verify --> endNode
 ```
 
