@@ -17,16 +17,16 @@ The AI reasoning engine uses a state-based workflow (LangGraph) to process repos
 
 ```mermaid
 graph TD
-    Start((Start)) --> scan[Scanner Node]
-    scan -->|Error| endNode((END))
-    scan -->|Continue| plan[Planner Node]
+    Start(("Start")) --> scan["Scanner Node"]
+    scan -->|Error| endNode(("End"))
+    scan -->|Continue| plan["Planner Node"]
     
     plan -->|Error| endNode
-    plan -->|Continue| build[Dockerfile Generator]
+    plan -->|Continue| build["Dockerfile Generator"]
     
-    build --> compose[Compose Generator]
-    compose --> nginx[Nginx Generator]
-    nginx --> verify[Verifier Node]
+    build --> compose["Compose Generator"]
+    compose --> nginx["Nginx Generator"]
+    nginx --> verify["Verifier Node"]
     verify --> endNode
 ```
 
