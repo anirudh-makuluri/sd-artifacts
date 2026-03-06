@@ -11,6 +11,25 @@ DeployPilot-AI Repo Analyzer is an intelligent deployment companion that scans G
 - **Nginx Reverse Proxy Configuration:** Automatically produces an `nginx.conf` for a secure, production-grade reverse proxy.
 - **RESTful API:** Developed with FastAPI to provide a fast and reliable `/analyze` endpoint for CI/CD or dashboard integration.
 
+## Architecture
+
+The AI reasoning engine uses a state-based workflow (LangGraph) to process repositories step-by-step:
+
+```mermaid
+graph TD
+    Start((Start)) --> scan[Scanner Node]
+    scan -->|Error| endNode((END))
+    scan -->|Continue| plan[Planner Node]
+    
+    plan -->|Error| endNode
+    plan -->|Continue| build[Dockerfile Generator]
+    
+    build --> compose[Compose Generator]
+    compose --> nginx[Nginx Generator]
+    nginx --> verify[Verifier Node]
+    verify --> endNode
+```
+
 ## Installation
 
 1. **Clone the repository:**
