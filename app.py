@@ -37,6 +37,7 @@ class AnalyzeResponse(BaseModel):
     has_existing_compose: bool = False
     risks: List[str]
     confidence: float
+    hadolint_results: Dict[str, str] = {}
     token_usage: TokenUsage = TokenUsage()
 
 @app.post("/analyze", response_model=AnalyzeResponse)
@@ -69,6 +70,7 @@ async def analyze_repo(req: AnalyzeRequest):
         has_existing_compose=result.get("has_existing_compose", False),
         risks=result.get("risks", []),
         confidence=result.get("confidence", 0.0),
+        hadolint_results=result.get("hadolint_results", {}),
         token_usage=TokenUsage(**tracker.get_usage())
     )
     

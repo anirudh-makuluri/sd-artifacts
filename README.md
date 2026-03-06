@@ -45,6 +45,12 @@ graph TD
    pip install -r requirements.txt
    ```
 
+3. **Install Hadolint (Required for Verifier Node):**
+   The Verifier node automatically runs `hadolint` to perform static code analysis on the generated Dockerfiles.
+   - **macOS/Linux:** `brew install hadolint`
+   - **Windows:** `scoop install hadolint`
+   - Or download from [their releases page](https://github.com/hadolint/hadolint/releases).
+
 3. **Configure Environment Variables:**
    Create a `.env` file in the root directory and add the following:
    ```env
@@ -80,6 +86,45 @@ graph TD
 
 3. **Response Structure:**
    The API will respond with JSON containing the detected stack, services needed, entry port, and all the generated infrastructure code (`dockerfile`, `docker_compose`, `nginx_conf`), alongside identified deployment risks and confidence score.
+
+   **Example Response:**
+   ```json
+   {
+     "stack_summary": "Next.js React app with WebSocket server",
+     "services": [
+       {
+         "name": "app",
+         "build_context": ".",
+         "port": 3000,
+         "dockerfile_path": "Dockerfile"
+       },
+       {
+         "name": "websocket",
+         "build_context": ".",
+         "port": 4001,
+         "dockerfile_path": "Dockerfile.websocket"
+       }
+     ],
+     "dockerfiles": { ... },
+     "docker_compose": "...",
+     "nginx_conf": "...",
+     "has_existing_dockerfiles": true,
+     "has_existing_compose": true,
+     "risks": [
+       "- The Dockerfile for the \"app\" service does not pin the version of the apk packages installed..."
+     ],
+     "confidence": 0.8,
+     "hadolint_results": {
+       "app": "-:7 DL3018 warning: Pin versions in apk add. Instead of `apk add <package>` use `apk add <package>=<version>`",
+       "websocket": ""
+     },
+     "token_usage": {
+       "input_tokens": 11796,
+       "output_tokens": 2507,
+       "total_tokens": 14303
+     }
+   }
+   ```
 
 ## Tech Stack
 

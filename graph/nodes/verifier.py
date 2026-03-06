@@ -2,6 +2,7 @@ from typing import Dict, Any, List
 from pydantic import BaseModel, Field, model_validator
 import json
 import re
+import subprocess
 from .llm_config import llm_verifier
 
 
@@ -22,6 +23,22 @@ class VerifierOutput(BaseModel):
         return data
 
 
+def run_hadolint(dockerfile_content: str) -> str:
+    """Run hadolint on the provided Dockerfile content and return findings."""
+    try:
+        result = subprocess.run(
+            ["hadolint", "-"],
+            input=dockerfile_content,
+            text=True,
+            capture_output=True,
+            check=False
+        )
+        return result.stdout.strip() if result.stdout else result.stderr.strip()
+    except FileNotFoundError:
+        return "hadolint not installed or not found in PATH."
+    except Exception as e:
+        return f"Error running hadolint: {e}"
+
 def verifier_node(state: Dict[str, Any]) -> Dict[str, Any]:
     """Review all generated artifacts and assign confidence + risks."""
     scan = state.get("repo_scan", {})
@@ -29,6 +46,12 @@ def verifier_node(state: Dict[str, Any]) -> Dict[str, Any]:
     dockerfiles = state.get("dockerfiles", {})
     docker_compose = state.get("docker_compose", "")
     nginx_conf = state.get("nginx_conf", "")
+
+    hadolint_results = {}
+    for service, content in dockerfiles.items():
+        hadolint_results[service] = run_hadolint(content)
+        
+    hadolint_output_str = json.dumps(hadolint_results, indent=2)
 
     prompt = f"""
 You are a senior DevOps reviewer. Review ALL the generated deployment artifacts below for a repository and assess their quality.
@@ -41,6 +64,9 @@ REPO INFO:
 
 GENERATED DOCKERFILES:
 {json.dumps(dockerfiles, indent=2)}
+
+HADOLINT ANALYSIS (LINTER RESULTS):
+{hadolint_output_str}
 
 GENERATED DOCKER-COMPOSE:
 {docker_compose}
@@ -66,8 +92,10 @@ If everything looks good, confidence should be high (0.85+) with an empty or min
         result = structured_llm.invoke(prompt)
         state["confidence"] = result.confidence
         state["risks"] = result.risks
+        state["hadolint_results"] = hadolint_results
     except Exception as e:
         state["confidence"] = 0.5
         state["risks"] = [f"Verifier failed to run: {e}"]
+        state["hadolint_results"] = hadolint_results
     
     return state
