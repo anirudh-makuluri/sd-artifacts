@@ -25,12 +25,6 @@
 - Support pricing for different models (Haiku, Sonnet, etc.)
 - Track per-node cost breakdown for optimization
 
-## 5. Kubernetes Manifest Generation
-- New `k8s_generator_node` as an alternative to compose
-- Generate: Deployment, Service, Ingress, ConfigMap, Secret templates
-- Support Helm chart generation for parameterized deployments
-- Add a request flag: `output_format: "compose" | "kubernetes" | "both"`
-
 ## [x] 6. Caching & Rate Limiting
 - Cache repo scans by `repo_url + commit_sha` to avoid redundant GitHub API calls
 - Use in-memory cache (TTL-based) or Redis for persistence
@@ -49,15 +43,43 @@
 - Set per-node timeout limits
 - Fallback to simpler prompts on repeated failures
 
-## 9. Neo4j Graph Database Integration
-- Store repository analysis results as a knowledge graph
-- **Node types**: Repository, Service, Dockerfile, ComposeFile, NginxConfig, EnvVar, Dependency
-- **Relationships**: `HAS_SERVICE`, `USES_DOCKERFILE`, `DEPENDS_ON`, `EXPOSES_PORT`, `REQUIRES_ENV`
-- **Use cases**:
-  - Query similar repos: "Find all repos using Next.js + PostgreSQL"
-  - Dependency graph visualization
-  - Track analysis history and config drift over time
-  - Recommend configurations based on similar stack patterns
-  - Cross-repo insights: "Which repos use this same base image?"
-- Add a `neo4j_storage_node` that persists analysis results after the verifier
-- New API endpoints: `GET /repos/{id}/graph`, `GET /search?stack=nextjs`
+## [x] 10. Example Bank Grounding (Supabase)
+- Added `example_bank` table in Supabase with RLS + indexes for `artifact_type`, `quality_score`, and `stack_tags`.
+- Added seeding pipeline (`tools/example_bank.py`) to ingest Dockerfile/compose examples from curated popular repos.
+- Added permissive license filtering and upsert behavior keyed by `source_repo + source_path`.
+- Added retrieval + ranking logic based on stack tags and quality score.
+- Integrated retrieved examples into generation prompts:
+  - `graph/nodes/dockerfile_generator.py`
+  - `graph/nodes/compose_generator.py`
+- Added API endpoints:
+  - `POST /examples/seed`
+  - `POST /examples/seed/popular`
+  - `POST /examples/preview`
+- Updated docs (`README.md`) with Supabase setup and example bank usage.
+
+## 11. Impact Metrics for Grounded Generation
+- Add run telemetry to measure whether `example_bank` grounding actually improves output quality over prompt-only generation.
+- Add a Supabase table `analysis_runs` with fields:
+  - `id`, `created_at`, `repo_url`, `commit_sha`, `package_path`
+  - `strategy` (`prompt_only` | `grounded_examples`)
+  - `detected_stack`, `services_count`
+  - `token_input`, `token_output`, `token_total`
+  - `latency_ms`, `example_count_used`, `example_retrieval_ms`
+- Add a Supabase table `analysis_quality_metrics` keyed by `run_id` with fields:
+  - `hadolint_warning_count`, `hadolint_error_count`
+  - `risk_count`, `confidence`
+  - `compose_valid`, `port_consistency_pass`
+  - `non_root_services_count`, `healthcheck_services_count`, `multi_stage_services_count`
+- Instrumentation points:
+  - `app.py`: start/end timing, strategy label, token totals, persist `analysis_runs`
+  - `graph/nodes/dockerfile_generator.py`: count retrieved examples per service
+  - `graph/nodes/compose_generator.py`: count compose examples used
+  - `graph/nodes/verifier.py`: convert hadolint output to numeric counters + compose validity checks
+- Optional human feedback table `analysis_feedback`:
+  - `run_id`, `accepted`, `manual_edits_required`, `manual_fix_minutes`, `notes`
+- Report weekly KPIs:
+  - Median hadolint warnings per run
+  - Median verifier risk count
+  - `% runs with confidence >= 0.85`
+  - `% runs with compose valid + port consistency pass`
+  - Median manual fix minutes
