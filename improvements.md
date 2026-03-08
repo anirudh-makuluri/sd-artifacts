@@ -1,48 +1,25 @@
 # sd-artifacts — Planned Improvements
 
-## [x] 1. Streaming Responses (SSE)
+## Completed
+
+### [x] 1. Streaming Responses (SSE)
 - Replace single POST response with Server-Sent Events
 - Stream each node's output as it completes: scanner → planner → dockerfiles → compose → nginx → verifier
 - Frontend gets real-time progress instead of waiting for the full pipeline
 - Use FastAPI's `StreamingResponse` with `text/event-stream`
 
-## 2. CI/CD Pipeline Generation
-- New `cicd_generator_node` after the verifier
-- Generate GitHub Actions workflow (`.github/workflows/deploy.yml`)
-- Support GitLab CI (`.gitlab-ci.yml`) as an alternative
-- Steps: build Docker images, push to registry, deploy to target (ECS, Cloud Run, k8s)
-- Auto-detect existing CI configs and improve them (same pattern as Dockerfile handling)
-
-## 3. Environment Variable Extraction
-- New `env_extractor_node` that parses codebase for env var references
-- Scan `process.env.*`, `os.getenv()`, `.env` files, and config files
-- Generate a `.env.example` with all required variables, defaults, and descriptions
-- Flag missing vars in compose and Dockerfiles
-
-## 4. Cost Estimation
-- Calculate `$` cost from token usage using model pricing
-- Include `cost_usd` field in API response
-- Support pricing for different models (Haiku, Sonnet, etc.)
-- Track per-node cost breakdown for optimization
-
-## [x] 6. Caching & Rate Limiting
+### [x] 2. Caching & Rate Limiting
 - Cache repo scans by `repo_url + commit_sha` to avoid redundant GitHub API calls
 - Use supabase db for storing responses
 - Return cached results instantly when available
 
-## 7. Deployment README Generation
-- New `readme_generator_node` at the end of the pipeline
-- Generate a `DEPLOY.md` with step-by-step deployment instructions
-- Include: prerequisites, env setup, build commands, and common troubleshooting
-- Tailored to the detected stack and generated configs
-
-## [x] 8. Retry Logic & Error Recovery
+### [x] 3. Retry Logic & Error Recovery
 - Add exponential backoff retries for failed LLM calls
 - Retry on malformed output (Pydantic validation failures)
 - Set per-node timeout limits
 - Fallback to simpler prompts on repeated failures
 
-## [x] 10. Example Bank Grounding (Supabase)
+### [x] 4. Example Bank Grounding (Supabase)
 - Added `example_bank` table in Supabase with RLS + indexes for `artifact_type`, `quality_score`, and `stack_tags`.
 - Added seeding pipeline (`tools/example_bank.py`) to ingest Dockerfile/compose examples from curated popular repos.
 - Added permissive license filtering and upsert behavior keyed by `source_repo + source_path`.
@@ -56,7 +33,62 @@
   - `POST /examples/preview`
 - Updated docs (`README.md`) with Supabase setup and example bank usage.
 
-## 11. Impact Metrics for Grounded Generation
+## Pending (Sorted by Priority)
+
+### [P0] 1. Feedback Loop for Failed or Low-Quality Output
+- Add a feedback endpoint so users can submit free-text feedback when generated deployment artifacts do not work.
+- Example feedback payload:
+  - `run_id`: ties feedback to a specific generation run
+  - `feedback_text`: e.g., "deployment is not working on Cloud Run"
+  - `severity`: `blocking | degraded | minor`
+  - `artifact_scope`: `dockerfile | compose | nginx | env | unknown`
+  - `optional_metadata`: logs, failing command, platform (`ecs`, `cloud_run`, `k8s`), runtime error snippets
+
+- Add a Supabase table `analysis_feedback` (expand the optional table from impact metrics):
+  - `id`, `created_at`, `run_id`, `user_id` (optional)
+  - `feedback_text`, `severity`, `artifact_scope`
+  - `resolved` (bool), `resolution_note`
+  - `workflow_version`, `retry_attempt`
+
+- Add a `feedback_interpreter_node` before regeneration:
+  - Classify feedback into actionable categories:
+    - `build_failure`
+    - `runtime_crash`
+    - `healthcheck_failure`
+    - `port_mismatch`
+    - `missing_env_var`
+    - `reverse_proxy_misconfig`
+  - Extract constraints from text/log snippets and create a `repair_plan` object.
+
+- Add a `targeted_regeneration` flow instead of full rerun by default:
+  - If `port_mismatch`, rerun `compose_generator` + `nginx_generator` + `verifier`
+  - If `missing_env_var`, rerun `env_extractor` + `compose_generator` + `verifier`
+  - If `build_failure`, rerun only `dockerfile_generator` + `verifier`
+  - Fall back to full pipeline if confidence in classification is low
+
+- Prompt adaptation:
+  - Inject `feedback_summary` and `repair_plan` into generation prompts
+  - Add explicit "previous output failed because ..." constraints
+  - Require generators to explain what changed to address feedback
+
+- Add "delta output" in API response:
+  - `changes_made`: list of concrete fixes applied
+  - `feedback_addressed`: bool
+  - `remaining_risks`: any unresolved items
+  - `suggested_next_debug_step`: if still failing
+
+- Learning loop:
+  - Persist `(feedback_category, stack_tags, successful_fix_pattern)` into `example_bank` metadata or a new `repair_patterns` table
+  - During future runs, retrieve prior successful repair patterns for similar stacks/issues
+  - Track KPI: `% feedback tickets resolved in first retry`
+
+### [P1] 2. Environment Variable Extraction
+- New `env_extractor_node` that parses codebase for env var references
+- Scan `process.env.*`, `os.getenv()`, `.env` files, and config files
+- Generate a `.env.example` with all required variables, defaults, and descriptions
+- Flag missing vars in compose and Dockerfiles
+
+### [P2] 3. Impact Metrics for Grounded Generation
 - Add run telemetry to measure whether `example_bank` grounding actually improves output quality over prompt-only generation.
 - Add a Supabase table `analysis_runs` with fields:
   - `id`, `created_at`, `repo_url`, `commit_sha`, `package_path`
@@ -83,50 +115,14 @@
   - `% runs with compose valid + port consistency pass`
   - Median manual fix minutes
 
-## 12. Feedback Loop for Failed or Low-Quality Output
-- Add a feedback endpoint so users can submit free-text feedback when generated deployment artifacts do not work.
-- Example feedback payload:
-  - `run_id`: ties feedback to a specific generation run
-  - `feedback_text`: e.g., "deployment is not working on Cloud Run"
-  - `severity`: `blocking | degraded | minor`
-  - `artifact_scope`: `dockerfile | compose | nginx | cicd | env | unknown`
-  - `optional_metadata`: logs, failing command, platform (`ecs`, `cloud_run`, `k8s`), runtime error snippets
+### [P3] 4. Deployment README Generation
+- New `readme_generator_node` at the end of the pipeline
+- Generate a `DEPLOY.md` with step-by-step deployment instructions
+- Include: prerequisites, env setup, build commands, and common troubleshooting
+- Tailored to the detected stack and generated configs
 
-- Add a Supabase table `analysis_feedback` (expand the optional table from item 11):
-  - `id`, `created_at`, `run_id`, `user_id` (optional)
-  - `feedback_text`, `severity`, `artifact_scope`
-  - `resolved` (bool), `resolution_note`
-  - `workflow_version`, `retry_attempt`
-
-- Add a `feedback_interpreter_node` before regeneration:
-  - Classify feedback into actionable categories:
-    - `build_failure`
-    - `runtime_crash`
-    - `healthcheck_failure`
-    - `port_mismatch`
-    - `missing_env_var`
-    - `reverse_proxy_misconfig`
-    - `cicd_failure`
-  - Extract constraints from text/log snippets and create a `repair_plan` object.
-
-- Add a `targeted_regeneration` flow instead of full rerun by default:
-  - If `port_mismatch`, rerun `compose_generator` + `nginx_generator` + `verifier`
-  - If `missing_env_var`, rerun `env_extractor` + `compose_generator` + `verifier`
-  - If `build_failure`, rerun only `dockerfile_generator` + `verifier`
-  - Fall back to full pipeline if confidence in classification is low
-
-- Prompt adaptation:
-  - Inject `feedback_summary` and `repair_plan` into generation prompts
-  - Add explicit "previous output failed because ..." constraints
-  - Require generators to explain what changed to address feedback
-
-- Add "delta output" in API response:
-  - `changes_made`: list of concrete fixes applied
-  - `feedback_addressed`: bool
-  - `remaining_risks`: any unresolved items
-  - `suggested_next_debug_step`: if still failing
-
-- Learning loop:
-  - Persist `(feedback_category, stack_tags, successful_fix_pattern)` into `example_bank` metadata or a new `repair_patterns` table
-  - During future runs, retrieve prior successful repair patterns for similar stacks/issues
-  - Track KPI: `% feedback tickets resolved in first retry`
+### [P4] 5. Cost Estimation
+- Calculate `$` cost from token usage using model pricing
+- Include `cost_usd` field in API response
+- Support pricing for different models (Haiku, Sonnet, etc.)
+- Track per-node cost breakdown for optimization
