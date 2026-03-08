@@ -1,6 +1,7 @@
 from typing import Dict, Any
 import json
-from .llm_config import llm_docker, strip_markdown_wrapper
+from .llm_config import llm_docker, strip_markdown_wrapper, RETRY_CONFIGS, FALLBACK_PROMPTS
+from graph.llm_retry import invoke_with_retry
 from tools.example_bank import fetch_reference_examples, format_examples_for_prompt
 
 
@@ -91,8 +92,18 @@ Rules:
 8. Reuse useful patterns from REFERENCE EXAMPLES where applicable, but do not copy exact text.
 """
         
-        resp = llm_docker.invoke(prompt)
-        dockerfiles[svc_name] = strip_markdown_wrapper(resp.content)
+        try:
+            response, _, _ = invoke_with_retry(
+                invoke_fn=lambda raw_prompt: llm_docker.invoke(raw_prompt),
+                prompt=prompt,
+                fallback_prompt=FALLBACK_PROMPTS["docker"],
+                config=RETRY_CONFIGS["docker"],
+                node_name=f"docker_gen:{svc_name}",
+            )
+            dockerfiles[svc_name] = strip_markdown_wrapper(response.content)
+        except Exception as e:
+            state["error"] = f"Failed generating Dockerfile for {svc_name}: {e}"
+            return state
     
     state["dockerfiles"] = dockerfiles
     return state

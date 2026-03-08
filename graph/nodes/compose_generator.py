@@ -1,6 +1,7 @@
 from typing import Dict, Any
 import json
-from .llm_config import llm_compose, strip_markdown_wrapper
+from .llm_config import llm_compose, strip_markdown_wrapper, RETRY_CONFIGS, FALLBACK_PROMPTS
+from graph.llm_retry import invoke_with_retry
 from tools.example_bank import fetch_reference_examples, format_examples_for_prompt
 
 
@@ -80,8 +81,20 @@ Rules:
 - Reuse useful patterns from REFERENCE EXAMPLES where applicable, but do not copy exact text.
 """
 
-    resp = llm_compose.invoke(prompt)
-    compose = strip_markdown_wrapper(resp.content, lang="yaml")
-    state["docker_compose"] = compose
+    try:
+        response, attempts_used, fallback_used = invoke_with_retry(
+            invoke_fn=lambda raw_prompt: llm_compose.invoke(raw_prompt),
+            prompt=prompt,
+            fallback_prompt=FALLBACK_PROMPTS["compose"],
+            config=RETRY_CONFIGS["compose"],
+            node_name="compose_gen",
+        )
+        compose = strip_markdown_wrapper(response.content, lang="yaml")
+        state["docker_compose"] = compose
+        state["compose_retry_attempts"] = attempts_used
+        state["compose_fallback_used"] = fallback_used
+    except Exception as e:
+        state["error"] = f"Failed generating docker-compose.yml: {e}"
+        return state
     
     return state

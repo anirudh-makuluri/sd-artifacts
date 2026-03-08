@@ -10,6 +10,18 @@ SD-Artifacts Repo Analyzer is an intelligent deployment companion that scans Git
 - **Docker Compose Setup:** Generates a `docker-compose.yml` file to handle your application and any required external dependencies for local or dev deployment.
 - **Nginx Reverse Proxy Configuration:** Automatically produces an `nginx.conf` for a secure, production-grade reverse proxy.
 - **RESTful API & Streaming:** Developed with FastAPI to provide a fast `/analyze` endpoint and a real-time `/analyze/stream` Server-Sent Events (SSE) endpoint for CI/CD or dashboard integration.
+- **Retry Logic & Error Recovery:** LLM-powered nodes use exponential backoff retries, timeout budgets, and fallback prompts for malformed or unstable model responses.
+
+## Retry and Timeout Behavior
+
+The planner, Dockerfile generator, compose generator, nginx generator, and verifier nodes all run through a shared retry wrapper.
+
+- Retries: Exponential backoff with jitter for transient LLM failures.
+- Validation recovery: Structured output and JSON parsing failures are retried.
+- Timeout budget: Each node has a max time budget to avoid indefinite hangs.
+- Prompt fallback: After repeated failures, each node switches to a simpler fallback prompt.
+
+Current defaults are defined in `graph/nodes/llm_config.py` (`RETRY_CONFIGS` and `FALLBACK_PROMPTS`).
 
 ## Architecture
 
@@ -20,15 +32,39 @@ graph TD
     Start(("Start")) --> scan["Scanner Node <br> (Checks Supabase Cache)"]
     scan -->|Cache Hit| endNode(("End (Return Cache)"))
     scan -->|Error| endNode
-    scan -->|Cache Miss| plan["Planner Node"]
-    
-    plan -->|Error| endNode
-    plan -->|Continue| build["Dockerfile Generator"]
-    
-    build --> compose["Compose Generator"]
-    compose --> nginx["Nginx Generator"]
-    nginx --> verify["Verifier Node <br> (Saves to Cache)"]
-    verify --> endNode
+  scan -->|Cache Miss| planCall["Planner LLM Call"]
+
+  planCall --> planRetry["Retry Wrapper <br> (exp backoff + jitter)"]
+  planRetry --> planFallback["Fallback Prompt <br> (after repeated failures)"]
+  planFallback --> planRetry
+  planRetry -->|Success| planOK["Planner Output Validated"]
+  planRetry -->|Timeout / Retries Exhausted| endNode
+
+  planOK --> buildCall["Dockerfile Generator LLM Call"]
+  buildCall --> buildRetry["Retry Wrapper"]
+  buildRetry --> buildFallback["Fallback Prompt"]
+  buildFallback --> buildRetry
+  buildRetry -->|Success| composeCall["Compose Generator LLM Call"]
+  buildRetry -->|Timeout / Retries Exhausted| endNode
+
+  composeCall --> composeRetry["Retry Wrapper"]
+  composeRetry --> composeFallback["Fallback Prompt"]
+  composeFallback --> composeRetry
+  composeRetry -->|Success| nginxCall["Nginx Generator LLM Call"]
+  composeRetry -->|Timeout / Retries Exhausted| endNode
+
+  nginxCall --> nginxRetry["Retry Wrapper"]
+  nginxRetry --> nginxFallback["Fallback Prompt"]
+  nginxFallback --> nginxRetry
+  nginxRetry -->|Success| verifyCall["Verifier LLM Call"]
+  nginxRetry -->|Timeout / Retries Exhausted| endNode
+
+  verifyCall --> verifyRetry["Retry Wrapper"]
+  verifyRetry --> verifyFallback["Fallback Prompt"]
+  verifyFallback --> verifyRetry
+  verifyRetry -->|Success| verifyDone["Verifier Node <br> (Saves to Cache)"]
+  verifyRetry -->|Timeout / Retries Exhausted| endNode
+  verifyDone --> endNode
 ```
 
 ## Installation

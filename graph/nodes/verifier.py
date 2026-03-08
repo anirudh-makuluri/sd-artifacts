@@ -3,7 +3,8 @@ from pydantic import BaseModel, Field, model_validator
 import json
 import re
 import subprocess
-from .llm_config import llm_verifier
+from .llm_config import llm_verifier, RETRY_CONFIGS, FALLBACK_PROMPTS
+from graph.llm_retry import invoke_with_retry
 
 
 class VerifierOutput(BaseModel):
@@ -86,13 +87,23 @@ Each risk must be a separate string in the list. Do NOT combine multiple risks i
 If everything looks good, confidence should be high (0.85+) with an empty or minimal risks list.
 """
 
-    structured_llm = llm_verifier.with_structured_output(VerifierOutput)
-    
     try:
-        result = structured_llm.invoke(prompt)
+        def _invoke(raw_prompt: str):
+            structured_llm = llm_verifier.with_structured_output(VerifierOutput)
+            return structured_llm.invoke(raw_prompt)
+
+        result, attempts_used, fallback_used = invoke_with_retry(
+            invoke_fn=_invoke,
+            prompt=prompt,
+            fallback_prompt=FALLBACK_PROMPTS["verifier"],
+            config=RETRY_CONFIGS["verifier"],
+            node_name="verifier",
+        )
         state["confidence"] = result.confidence
         state["risks"] = result.risks
         state["hadolint_results"] = hadolint_results
+        state["verifier_retry_attempts"] = attempts_used
+        state["verifier_fallback_used"] = fallback_used
     except Exception as e:
         state["confidence"] = 0.5
         state["risks"] = [f"Verifier failed to run: {e}"]

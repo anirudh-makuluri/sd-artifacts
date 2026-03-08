@@ -37,7 +37,7 @@
 - Include: prerequisites, env setup, build commands, and common troubleshooting
 - Tailored to the detected stack and generated configs
 
-## 8. Retry Logic & Error Recovery
+## [x] 8. Retry Logic & Error Recovery
 - Add exponential backoff retries for failed LLM calls
 - Retry on malformed output (Pydantic validation failures)
 - Set per-node timeout limits

@@ -1,5 +1,6 @@
 from typing import Dict, Any
-from .llm_config import llm_nginx, strip_markdown_wrapper
+from .llm_config import llm_nginx, strip_markdown_wrapper, RETRY_CONFIGS, FALLBACK_PROMPTS
+from graph.llm_retry import invoke_with_retry
 
 
 def nginx_generator_node(state: Dict[str, Any]) -> Dict[str, Any]:
@@ -59,10 +60,22 @@ Rules:
 - Output ONLY nginx config, no markdown wrappers.
 """
 
-    resp = llm_nginx.invoke(prompt)
-    nginx_conf = strip_markdown_wrapper(resp.content, lang="nginx")
-    if nginx_conf.startswith("conf\n"):
-        nginx_conf = nginx_conf[5:]
-    state["nginx_conf"] = nginx_conf
+    try:
+        response, attempts_used, fallback_used = invoke_with_retry(
+            invoke_fn=lambda raw_prompt: llm_nginx.invoke(raw_prompt),
+            prompt=prompt,
+            fallback_prompt=FALLBACK_PROMPTS["nginx"],
+            config=RETRY_CONFIGS["nginx"],
+            node_name="nginx_gen",
+        )
+        nginx_conf = strip_markdown_wrapper(response.content, lang="nginx")
+        if nginx_conf.startswith("conf\n"):
+            nginx_conf = nginx_conf[5:]
+        state["nginx_conf"] = nginx_conf
+        state["nginx_retry_attempts"] = attempts_used
+        state["nginx_fallback_used"] = fallback_used
+    except Exception as e:
+        state["error"] = f"Failed generating nginx.conf: {e}"
+        return state
     
     return state

@@ -1,6 +1,7 @@
 from langchain_aws import ChatBedrock
 import os
 from dotenv import load_dotenv
+from graph.llm_retry import RetryConfig
 
 load_dotenv()
 
@@ -26,6 +27,78 @@ llm_verifier = ChatBedrock(
     model_id=BEDROCK_MODEL_ID,
     model_kwargs={"temperature": 0.0, "max_tokens": 4096}
 )
+
+
+RETRY_CONFIGS = {
+        "planner": RetryConfig(max_attempts=3, timeout_seconds=90.0, fallback_after_attempt=2),
+        "docker": RetryConfig(max_attempts=3, timeout_seconds=120.0, fallback_after_attempt=2),
+        "compose": RetryConfig(max_attempts=3, timeout_seconds=120.0, fallback_after_attempt=2),
+        "nginx": RetryConfig(max_attempts=3, timeout_seconds=90.0, fallback_after_attempt=2),
+        "verifier": RetryConfig(max_attempts=3, timeout_seconds=90.0, fallback_after_attempt=2),
+}
+
+
+FALLBACK_PROMPTS = {
+        "planner": """
+You are analyzing repository metadata for deployability.
+
+Return ONLY raw JSON with this exact schema and no markdown:
+{
+    "is_deployable": boolean,
+    "error_reason": "string",
+    "detected_stack": "string",
+    "services": [
+        {
+            "name": "string",
+            "build_context": "string",
+            "port": integer,
+            "dockerfile_path": "string"
+        }
+    ],
+    "has_existing_dockerfiles": boolean,
+    "has_existing_compose": boolean
+}
+
+If unsure, set is_deployable=false and explain in error_reason.
+""".strip(),
+        "docker": """
+Generate ONLY a valid production Dockerfile.
+
+Rules:
+- Use multi-stage build when applicable.
+- Use slim/alpine base images.
+- Run as non-root user.
+- Include EXPOSE and HEALTHCHECK.
+- Output raw Dockerfile only.
+""".strip(),
+        "compose": """
+Generate ONLY a valid docker-compose YAML.
+
+Rules:
+- Include all application services.
+- Add required dependency services when implied.
+- Use env vars for credentials placeholders.
+- Output raw YAML only.
+""".strip(),
+        "nginx": """
+Generate ONLY a valid nginx.conf for reverse proxy.
+
+Rules:
+- Listen on port 80.
+- Add upstream routing for listed services.
+- Include security and proxy headers.
+- Output raw nginx config only.
+""".strip(),
+        "verifier": """
+Return ONLY JSON matching:
+{
+    "confidence": number,
+    "risks": ["string"]
+}
+
+Every risk must be a separate list item.
+""".strip(),
+}
 
 
 from langchain_core.callbacks import BaseCallbackHandler

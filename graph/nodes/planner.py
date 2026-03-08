@@ -1,7 +1,8 @@
 from typing import Dict, Any, List
 from pydantic import BaseModel, Field
 import json
-from .llm_config import llm_planner
+from .llm_config import llm_planner, RETRY_CONFIGS, FALLBACK_PROMPTS
+from graph.llm_retry import invoke_with_retry
 
 
 class ServiceInfo(BaseModel):
@@ -134,18 +135,27 @@ Respond ONLY with a raw JSON object matching this schema. Do not include markdow
 }
 """
 
-    try:
-        # First try parsing it manually
-        response = llm_planner.invoke(prompt)
+    def _invoke(raw_prompt: str):
+        return llm_planner.invoke(raw_prompt)
+
+    def _validate(response):
         content = response.content.strip()
-        
-        # Strip markdown if the LLM still added it
         if content.startswith("```"):
             import re
+
             content = re.sub(r"^```(?:json)?\s*\n(.*?)\n```$", r"\1", content, flags=re.DOTALL)
-            
         json_data = json.loads(content)
-        data = PlannerOutput(**json_data)
+        return PlannerOutput(**json_data)
+
+    try:
+        data, attempts_used, fallback_used = invoke_with_retry(
+            invoke_fn=_invoke,
+            prompt=prompt,
+            validator=_validate,
+            fallback_prompt=FALLBACK_PROMPTS["planner"],
+            config=RETRY_CONFIGS["planner"],
+            node_name="planner",
+        )
         
         if not data.is_deployable:
             state["error"] = data.error_reason or "This repository is not deployable as a web service"
@@ -160,9 +170,9 @@ Respond ONLY with a raw JSON object matching this schema. Do not include markdow
         state["services"] = [s.model_dump() for s in filtered_services]
         state["has_existing_dockerfiles"] = data.has_existing_dockerfiles
         state["has_existing_compose"] = data.has_existing_compose
+        state["planner_retry_attempts"] = attempts_used
+        state["planner_fallback_used"] = fallback_used
     except Exception as e:
-        # We also grab the raw message to figure out what it generated before failing
-        import traceback
         error_details = str(e)
         state["error"] = f"Failed to analyze repository: {error_details}"
         
