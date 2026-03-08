@@ -7,6 +7,11 @@ from graph.graph import graph
 from graph.nodes.llm_config import TokenTracker
 from fastapi.middleware.cors import CORSMiddleware
 import os
+from tools.example_bank import (
+    POPULAR_EXAMPLE_REPOS,
+    seed_example_bank_from_repos,
+    fetch_reference_examples,
+)
 
 app = FastAPI(title="SD-Artifacts Repo Analyzer")
 
@@ -41,6 +46,31 @@ class AnalyzeResponse(BaseModel):
     confidence: float
     hadolint_results: Dict[str, str] = {}
     token_usage: TokenUsage = TokenUsage()
+
+
+class SeedExampleBankRequest(BaseModel):
+    repo_urls: List[str]
+    github_token: Optional[str] = None
+    max_files_per_repo: int = 20
+    permissive_only: bool = True
+
+
+class SeedExampleBankResponse(BaseModel):
+    inserted: int
+    updated: int
+    skipped: int
+    errors: List[str] = []
+
+
+class PreviewExamplesRequest(BaseModel):
+    artifact_type: str
+    detected_stack: str
+    service: Optional[Dict[str, str]] = None
+    limit: int = 3
+
+
+class PreviewExamplesResponse(BaseModel):
+    examples: List[Dict]
 
 @app.post("/analyze", response_model=AnalyzeResponse)
 async def analyze_repo(req: AnalyzeRequest):
@@ -99,6 +129,42 @@ async def analyze_repo(req: AnalyzeRequest):
                     time.sleep(1)
 
     return response
+
+
+@app.post("/examples/seed", response_model=SeedExampleBankResponse)
+async def seed_example_bank(req: SeedExampleBankRequest):
+    result = seed_example_bank_from_repos(
+        repo_urls=req.repo_urls,
+        github_token=req.github_token,
+        max_files_per_repo=req.max_files_per_repo,
+        permissive_only=req.permissive_only,
+    )
+    return SeedExampleBankResponse(**result)
+
+
+@app.post("/examples/seed/popular", response_model=SeedExampleBankResponse)
+async def seed_example_bank_popular(github_token: Optional[str] = None):
+    result = seed_example_bank_from_repos(
+        repo_urls=POPULAR_EXAMPLE_REPOS,
+        github_token=github_token,
+        max_files_per_repo=20,
+        permissive_only=True,
+    )
+    return SeedExampleBankResponse(**result)
+
+
+@app.post("/examples/preview", response_model=PreviewExamplesResponse)
+async def preview_example_bank_matches(req: PreviewExamplesRequest):
+    if req.artifact_type not in {"dockerfile", "compose"}:
+        raise HTTPException(status_code=400, detail="artifact_type must be 'dockerfile' or 'compose'")
+
+    examples = fetch_reference_examples(
+        artifact_type=req.artifact_type,
+        detected_stack=req.detected_stack,
+        service=req.service,
+        limit=req.limit,
+    )
+    return PreviewExamplesResponse(examples=examples)
 
 @app.post("/analyze/stream")
 async def analyze_repo_stream(req: AnalyzeRequest):

@@ -60,8 +60,15 @@ graph TD
    AWS_SECRET_ACCESS_KEY=your_aws_secret_key
    AWS_DEFAULT_REGION=your_aws_region
    BEDROCK_MODEL_ID=anthropic.claude-3-haiku-20240307-v1:0
+  SUPABASE_URL=your_supabase_project_url
+  SUPABASE_SERVICE_ROLE_KEY=your_supabase_service_role_key
    PORT=8080
    ```
+
+4. **Initialize Supabase Tables:**
+  Run `supabase_schema.sql` in your Supabase SQL editor to create:
+  - `analysis_cache`
+  - `example_bank` (for Dockerfile/compose reference examples)
 
 ## Usage
 
@@ -149,6 +156,39 @@ graph TD
        "total_tokens": 14303
      }
    }
+   ```
+
+5. **Seed the Example Bank (Supabase):**
+   Seed from your own curated list of repositories:
+   ```bash
+   curl -X POST http://localhost:8080/examples/seed \
+        -H "Content-Type: application/json" \
+        -d '{
+              "repo_urls": [
+                "https://github.com/vercel/next.js",
+                "https://github.com/tiangolo/full-stack-fastapi-template"
+              ],
+              "max_files_per_repo": 20,
+              "permissive_only": true
+            }'
+   ```
+
+   Or seed from the built-in popular repository list:
+   ```bash
+   curl -X POST "http://localhost:8080/examples/seed/popular"
+   ```
+
+6. **Preview Retrieved Examples (Debug):**
+   This lets you inspect what examples will be sent into generation prompts:
+   ```bash
+   curl -X POST http://localhost:8080/examples/preview \
+        -H "Content-Type: application/json" \
+        -d '{
+              "artifact_type": "dockerfile",
+              "detected_stack": "Next.js app with Node backend",
+              "service": {"name": "web", "build_context": "."},
+              "limit": 3
+            }'
    ```
 
 ## Tech Stack

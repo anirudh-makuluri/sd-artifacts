@@ -19,3 +19,39 @@ create policy "Allow service role full access to analysis_cache"
   to service_role
   using (true)
   with check (true);
+
+-- Create example_bank table for grounded generation references
+create table if not exists public.example_bank (
+  id uuid default gen_random_uuid() primary key,
+  source_repo text not null,
+  source_path text not null,
+  artifact_type text not null check (artifact_type in ('dockerfile', 'compose')),
+  stack_tags text[] not null default '{}',
+  license text,
+  quality_score double precision not null default 0.5,
+  snippet text not null,
+  content text not null,
+  is_active boolean not null default true,
+  created_at timestamp with time zone default timezone('utc'::text, now()) not null,
+  updated_at timestamp with time zone default timezone('utc'::text, now()) not null,
+  unique(source_repo, source_path)
+);
+
+create index if not exists idx_example_bank_artifact_active
+  on public.example_bank (artifact_type, is_active);
+
+create index if not exists idx_example_bank_quality
+  on public.example_bank (quality_score desc);
+
+create index if not exists idx_example_bank_tags_gin
+  on public.example_bank using gin (stack_tags);
+
+alter table public.example_bank enable row level security;
+
+create policy "Allow service role full access to example_bank"
+  on public.example_bank
+  as permissive
+  for all
+  to service_role
+  using (true)
+  with check (true);
