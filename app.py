@@ -248,7 +248,8 @@ async def analyze_repo_stream(req: AnalyzeRequest):
                         cached = state_update["cached_response"]
                         # Inject current token usage into the cached response before returning
                         if "token_usage" not in cached:
-                            cached["token_usage"] = TokenUsage(**tracker.get_usage()).dict()
+                            usage = TokenUsage(**tracker.get_usage())
+                            cached["token_usage"] = usage.model_dump() if hasattr(usage, "model_dump") else usage.dict()
                         cached.setdefault("commit_sha", state_update.get("commit_sha", full_state.get("commit_sha", "unknown")))
                             
                         # Ensure fields conform
