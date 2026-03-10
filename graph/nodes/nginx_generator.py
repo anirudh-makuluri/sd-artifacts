@@ -38,6 +38,7 @@ If it can be improved, return the IMPROVED version.
 Rules:
 - Listen on port 80.
 - Route traffic to each service appropriately (e.g., frontend on /, WebSocket on /ws, API on /api).
+- Use `localhost` as upstream hostnames (e.g., `proxy_pass http://localhost:3000`).
 - Include security headers (X-Frame-Options, X-Content-Type-Options, HSTS, etc.).
 - Include proper proxy headers (X-Real-IP, X-Forwarded-For).
 - For WebSocket services, include proper upgrade headers.
@@ -53,7 +54,7 @@ Services:
 Rules:
 - Listen on port 80.
 - Route traffic to each service appropriately (e.g., frontend on /, WebSocket on /ws, API on /api).
-- Use docker-compose service names as upstream hostnames (e.g., proxy_pass http://frontend:3000).
+- Use `localhost` as upstream hostnames (e.g., `proxy_pass http://localhost:3000`).
 - Include security headers (X-Frame-Options, X-Content-Type-Options, HSTS, etc.).
 - Include proper proxy headers (X-Real-IP, X-Forwarded-For).
 - For WebSocket services, include proper upgrade headers (Connection, Upgrade).
