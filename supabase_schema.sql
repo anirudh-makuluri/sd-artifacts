@@ -55,3 +55,28 @@ create policy "Allow service role full access to example_bank"
   to service_role
   using (true)
   with check (true);
+
+-- Store benchmark artifacts (labels, quality reports, latest snapshots)
+create table if not exists public.benchmark_artifacts (
+  id uuid default gen_random_uuid() primary key,
+  file_name text not null unique,
+  artifact_type text not null,
+  run_id text,
+  generated_at timestamp with time zone,
+  payload jsonb not null,
+  created_at timestamp with time zone default timezone('utc'::text, now()) not null,
+  updated_at timestamp with time zone default timezone('utc'::text, now()) not null
+);
+
+create index if not exists idx_benchmark_artifacts_type_generated
+  on public.benchmark_artifacts (artifact_type, generated_at desc);
+
+alter table public.benchmark_artifacts enable row level security;
+
+create policy "Allow service role full access to benchmark_artifacts"
+  on public.benchmark_artifacts
+  as permissive
+  for all
+  to service_role
+  using (true)
+  with check (true);

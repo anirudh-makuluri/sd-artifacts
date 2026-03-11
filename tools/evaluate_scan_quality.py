@@ -19,6 +19,7 @@ if PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
 
 from graph.nodes import planner_node
+from tools.benchmark_storage import save_benchmark_artifact, save_benchmark_artifact_from_path
 from tools.eval_metrics import score_repo, summarize_scores
 from tools.github_tools import fetch_repo_structure_impl
 
@@ -255,6 +256,7 @@ def run() -> int:
         scored_reports.append(_build_repo_report(result, label))
 
     elapsed_seconds = time.perf_counter() - start_time
+    run_id = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
 
     summary = summarize_scores(score_inputs)
     summary["elapsed_seconds"] = round(elapsed_seconds, 3)
@@ -269,6 +271,7 @@ def run() -> int:
     summary["failure_buckets"] = failure_buckets
 
     report = {
+        "run_id": run_id,
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "labels_file": args.labels_file,
         "targets_evaluated": [{"repo": t["repo"], "repo_url": t["repo_url"], "package_path": t.get("package_path", ".")} for t in targets],
@@ -279,13 +282,19 @@ def run() -> int:
     }
 
     output_path = args.output or _default_output_path()
-    os.makedirs(os.path.dirname(output_path), exist_ok=True)
-    with open(output_path, "w", encoding="utf-8") as handle:
+    output_file_name = os.path.basename(output_path)
+
+    latest_output_path = os.path.join("benchmarks", "latest-scan-quality.json")
+    os.makedirs(os.path.dirname(latest_output_path), exist_ok=True)
+    with open(latest_output_path, "w", encoding="utf-8") as handle:
         json.dump(report, handle, indent=2)
 
+    save_benchmark_artifact(output_file_name, report)
+    save_benchmark_artifact_from_path(latest_output_path, report)
+
     print("\nScan quality summary")
-    print(json.dumps(summary, indent=2))
-    print(f"\nDetailed report written to: {output_path}")
+    print(f"\nPer-run benchmark stored in Supabase as: {output_file_name}")
+    print(f"Latest benchmark snapshot written to: {latest_output_path}")
 
     return 0
 
