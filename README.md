@@ -10,11 +10,14 @@ SD-Artifacts Repo Analyzer is an intelligent deployment companion that scans Git
 - **Docker Compose Setup:** Generates a `docker-compose.yml` file to handle your application and any required external dependencies for local or dev deployment.
 - **Nginx Reverse Proxy Configuration:** Automatically produces an `nginx.conf` for a secure, production-grade reverse proxy.
 - **RESTful API & Streaming:** Developed with FastAPI to provide a fast `/analyze` endpoint and a real-time `/analyze/stream` Server-Sent Events (SSE) endpoint for CI/CD or dashboard integration.
+- **Feedback-Driven Multi-Agent Remediation:** A `/feedback` endpoint runs a coordinator + specialized file agents workflow that decides which artifacts to change (Dockerfile/compose/nginx), applies targeted fixes, and re-verifies confidence and risks.
 - **Retry Logic & Error Recovery:** LLM-powered nodes use exponential backoff retries, timeout budgets, and fallback prompts for malformed or unstable model responses.
 
 ## Retry and Timeout Behavior
 
 The planner, Dockerfile generator, compose generator, nginx generator, and verifier nodes all run through a shared retry wrapper.
+
+The feedback coordinator and feedback remediation agents also run through the same retry wrapper.
 
 - Retries: Exponential backoff with jitter for transient LLM failures.
 - Validation recovery: Structured output and JSON parsing failures are retried.
@@ -22,6 +25,20 @@ The planner, Dockerfile generator, compose generator, nginx generator, and verif
 - Prompt fallback: After repeated failures, each node switches to a simpler fallback prompt.
 
 Current defaults are defined in `graph/nodes/llm_config.py` (`RETRY_CONFIGS` and `FALLBACK_PROMPTS`).
+
+## Feedback Remediation Workflow
+
+The `/feedback` endpoint uses a second LangGraph workflow that runs after an existing cached analysis is found for a given `repo_url + commit_sha`.
+
+Flow:
+
+1. **Coordinator Agent:** Reads user feedback, prior hadolint warnings, and prior risks; emits a per-artifact change plan.
+2. **Dockerfile Improver Agent:** Applies targeted changes only for services marked `should_change=true`.
+3. **Compose Improver Agent:** Updates `docker-compose.yml` only when needed.
+4. **Nginx Improver Agent:** Updates `nginx.conf` only when needed.
+5. **Verifier Agent:** Re-runs hadolint + risk/confidence review and returns the updated quality assessment.
+
+If the coordinator fails, a fallback plan marks all artifacts as changeable so remediation can still proceed.
 
 ## Architecture
 
@@ -239,11 +256,29 @@ graph TD
             }'
    ```
 
+8. **Improve Existing Results Using Feedback:**
+   Use this when an analyzed repo has deployment issues and you want targeted iteration over existing generated artifacts.
+
+   ```bash
+   curl -X POST http://localhost:8080/feedback \
+        -H "Content-Type: application/json" \
+        -d '{
+              "repo_url": "https://github.com/user/repo-name",
+              "commit_sha": "abc123def456",
+              "feedback": "The API container fails health checks and nginx is not routing /api correctly"
+            }'
+   ```
+
+   Notes:
+   - `repo_url + commit_sha` must already exist in `analysis_cache`.
+   - The response shape is the same as `/analyze` (updated artifacts, risks, confidence, hadolint results).
+   - The improved result is upserted back into cache for that same `repo_url + commit_sha`.
+
 ## Tech Stack
 
 - **FastAPI** & **Uvicorn**: High-performance REST API.
 - **LangChain** & **LangGraph**: State-based agentic workflow design.
-- **Amazon Bedrock (Claude 3 Haiku)**: The AI reasoning engine used for stack inference and infrastructure code generation.
+- **Amazon Bedrock (Claude Haiku)**: The AI reasoning engine used for stack inference and infrastructure code generation.
 - **GitHub API**: For repository file analysis.
 
 ## License

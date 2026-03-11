@@ -27,6 +27,10 @@ llm_verifier = ChatBedrock(
     model_id=BEDROCK_MODEL_ID,
     model_kwargs={"temperature": 0.0, "max_tokens": 4096}
 )
+llm_coordinator = ChatBedrock(
+    model_id=BEDROCK_MODEL_ID,
+    model_kwargs={"temperature": 0.2, "max_tokens": 4096}
+)
 
 
 RETRY_CONFIGS = {
@@ -35,6 +39,7 @@ RETRY_CONFIGS = {
         "compose": RetryConfig(max_attempts=3, timeout_seconds=120.0, fallback_after_attempt=2),
         "nginx": RetryConfig(max_attempts=3, timeout_seconds=90.0, fallback_after_attempt=2),
         "verifier": RetryConfig(max_attempts=3, timeout_seconds=90.0, fallback_after_attempt=2),
+    "coordinator": RetryConfig(max_attempts=3, timeout_seconds=90.0, fallback_after_attempt=2),
 }
 
 
@@ -97,6 +102,24 @@ Return ONLY JSON matching:
 }
 
 Every risk must be a separate list item.
+""".strip(),
+        "coordinator": """
+Return ONLY raw JSON with this exact schema and no markdown:
+{
+    "change_plan": [
+        {
+            "artifact_type": "dockerfile" | "compose" | "nginx",
+            "service_name": "string",
+            "should_change": boolean,
+            "instructions": "string"
+        }
+    ],
+    "summary": "string"
+}
+
+Include one entry per Dockerfile service (using its service_name), plus one entry each for compose and nginx.
+For artifact_type compose and nginx, service_name must be an empty string.
+Set should_change=true only for artifacts that need changes based on feedback and findings.
 """.strip(),
 }
 

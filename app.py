@@ -84,6 +84,13 @@ class DeleteCacheResponse(BaseModel):
     repo_url: str
     commit_sha: Optional[str] = None
 
+
+class FeedbackRequest(BaseModel):
+    repo_url: str
+    commit_sha: str
+    feedback: str
+    github_token: Optional[str] = None
+
 @app.post("/analyze", response_model=AnalyzeResponse)
 async def analyze_repo(req: AnalyzeRequest):
     tracker = TokenTracker()
@@ -300,6 +307,74 @@ async def analyze_repo_stream(req: AnalyzeRequest):
             yield f"event: error\ndata: {json.dumps({'detail': str(e)})}\n\n"
 
     return StreamingResponse(event_generator(), media_type="text/event-stream")
+
+
+@app.post("/feedback", response_model=AnalyzeResponse)
+async def improve_with_feedback(req: FeedbackRequest):
+    from db import supabase
+    from graph.feedback import run_feedback_improvement
+
+    if not supabase:
+        raise HTTPException(status_code=503, detail="Supabase is not configured")
+
+    # 1. Fetch existing cached analysis
+    try:
+        existing = (
+            supabase.table("analysis_cache")
+            .select("result")
+            .eq("repo_url", req.repo_url)
+            .eq("commit_sha", req.commit_sha)
+            .single()
+            .execute()
+        )
+    except Exception as e:
+        raise HTTPException(status_code=404, detail=f"No cached analysis found for {req.repo_url}@{req.commit_sha}")
+
+    cached_result = existing.data.get("result") if existing.data else None
+    if not cached_result:
+        raise HTTPException(status_code=404, detail=f"No cached analysis found for {req.repo_url}@{req.commit_sha}")
+
+    # 2. Regenerate artifacts guided by the feedback
+    tracker = TokenTracker()
+    try:
+        improved = run_feedback_improvement(cached_result, req.feedback)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Feedback improvement failed: {e}")
+
+    # 3. Build the response
+    response = AnalyzeResponse(
+        commit_sha=req.commit_sha,
+        stack_summary=improved["stack_summary"],
+        services=improved["services"],
+        dockerfiles=improved["dockerfiles"],
+        docker_compose=improved.get("docker_compose"),
+        nginx_conf=improved.get("nginx_conf"),
+        has_existing_dockerfiles=improved["has_existing_dockerfiles"],
+        has_existing_compose=improved["has_existing_compose"],
+        risks=improved["risks"],
+        confidence=improved["confidence"],
+        hadolint_results=improved["hadolint_results"],
+        token_usage=TokenUsage(**tracker.get_usage()),
+    )
+
+    # 4. Upsert the improved result back to cache
+    result_dict = response.model_dump() if hasattr(response, "model_dump") else response.dict()
+    result_dict["_cache_package_path"] = cached_result.get("_cache_package_path", ".")
+    try:
+        supabase.table("analysis_cache").upsert(
+            {
+                "repo_url": req.repo_url,
+                "commit_sha": req.commit_sha,
+                "result": result_dict,
+            },
+            on_conflict="repo_url,commit_sha",
+        ).execute()
+        print(f"Updated feedback-improved cache for {req.repo_url}@{req.commit_sha}")
+    except Exception as e:
+        print(f"Failed to update cache after feedback improvement: {e}")
+
+    return response
+
 
 if __name__ == "__main__":
     import uvicorn
