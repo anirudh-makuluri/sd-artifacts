@@ -4,7 +4,7 @@ SD-Artifacts Repo Analyzer is an intelligent deployment companion that scans Git
 
 ## Features
 
-- **Automated Repository Scanning:** Fetches file trees and key file contents (`package.json`, `requirements.txt`, etc.) from any public or private GitHub repository using your GitHub token.
+- **Automated Repository Scanning:** Fetches file trees and key file contents (`package.json`, `requirements.txt`, selected deploy-related markdown docs, etc.) from any public or private GitHub repository using your GitHub token.
 - **Intelligent Stack Detection:** Automatically infers the application's tech stack, entry port, and needed external services (like databases, Redis, etc.).
 - **Production-Ready Dockerfile Generation:** Creates multi-stage, secure, and optimized Dockerfiles for your application.
 - **Docker Compose Setup:** Generates a `docker-compose.yml` file to handle your application and any required external dependencies for local or dev deployment.
@@ -12,6 +12,15 @@ SD-Artifacts Repo Analyzer is an intelligent deployment companion that scans Git
 - **RESTful API & Streaming:** Developed with FastAPI to provide a fast `/analyze` endpoint and a real-time `/analyze/stream` Server-Sent Events (SSE) endpoint for CI/CD or dashboard integration.
 - **Feedback-Driven Multi-Agent Remediation:** A `/feedback` endpoint runs a coordinator + specialized file agents workflow that decides which artifacts to change (Dockerfile/compose/nginx), applies targeted fixes, and re-verifies confidence and risks.
 - **Retry Logic & Error Recovery:** LLM-powered nodes use exponential backoff retries, timeout budgets, and fallback prompts for malformed or unstable model responses.
+
+## Stack Tokens
+
+Stack token definitions are centralized so scanning, port inference, and benchmark labeling stay consistent.
+
+- Code registry: `tools/stack_tokens.py`
+- Human-readable reference: `benchmarks/stack_tokens.md`
+
+Use canonical tokens from this registry in `required_stack_tokens` entries inside benchmark label files.
 
 ## Retry and Timeout Behavior
 
@@ -169,7 +178,7 @@ graph TD
    data: { ... full JSON response ... }
    ```
 
-4. **Response Structure:**
+ 4. **Response Structure:**
    The API will respond with JSON containing the detected stack, services needed, entry port, and all the generated infrastructure code (`dockerfile`, `docker_compose`, `nginx_conf`), alongside identified deployment risks and confidence score.
 
    **Example Response:**
@@ -177,6 +186,7 @@ graph TD
    {
      "commit_sha": "abc123def4567890",
      "stack_summary": "Next.js React app with WebSocket server",
+     "stack_tokens": ["node", "next", "react", "nginx"],
      "services": [
        {
          "name": "app",
@@ -240,10 +250,13 @@ graph TD
         -d '{
               "artifact_type": "dockerfile",
               "detected_stack": "Next.js app with Node backend",
+              "stack_tokens": ["node", "next", "react"],
               "service": {"name": "web", "build_context": "."},
               "limit": 3
             }'
    ```
+
+   `stack_tokens` is optional but preferred when available.
 
 7. **Delete Cached Analysis Result:**
    Delete cached entries for a repository. Provide `commit_sha` to delete one specific cached result, or omit it to delete all cache rows for the repository.
@@ -258,6 +271,56 @@ graph TD
 
 8. **Improve Existing Results Using Feedback:**
    Use this when an analyzed repo has deployment issues and you want targeted iteration over existing generated artifacts.
+
+## Scan Quality Benchmarking (Objective Metrics)
+
+You can benchmark scanner/planner accuracy using a lightweight labels file as the source of truth.
+
+### 1) Prepare labels
+
+Create `benchmarks/example_bank_labels.json` using `benchmarks/example_bank_labels.sample.json` as a template.
+
+Label fields:
+- `repo_url`: preferred full GitHub repo URL
+- `repo`: optional GitHub full name (`owner/repo`) if `repo_url` is omitted
+- `package_path`: optional repo subpath to evaluate (default `.`)
+- `required_stack_tokens`: canonical tokens expected in predicted stack tokens (e.g. `next`, `node`, `fastapi`)
+- `expected_services`: ground-truth deployable services (`name`, `build_context`)
+- `excluded_services`: services that must be excluded (for mobile leakage checks)
+- `expected_ports`: optional known ports by service name
+
+Notes:
+- Labels are evaluated as targets (`repo_url + package_path`), so you can include multiple entries for the same repo.
+- This is useful for monorepos where deployable examples live under subpaths.
+
+### 2) Run benchmark
+
+```bash
+python tools/evaluate_scan_quality.py \
+  --labels-file benchmarks/example_bank_labels.json \
+  --max-files 50
+```
+
+Behavior:
+- The script evaluates only entries present in the labels file.
+- `--repos` acts only as a filter over the labeled entries.
+- Output report is written to `benchmarks/scan-quality-<timestamp>.json`.
+
+### 3) Metrics reported
+
+- `service_precision`, `service_recall`, `service_f1`
+- `mobile_leakage_rate`
+- `stack_accuracy` (on repos with `required_stack_tokens` labels)
+- `port_accuracy_known` and `port_unknown_rate` (on labeled ports)
+- repo-level TP/FP/FN and mismatch details
+
+### 4) Recommended gates
+
+- `service_precision >= 0.92`
+- `service_recall >= 0.90`
+- `mobile_leakage_rate <= 0.02`
+- `stack_accuracy >= 0.90` (for labeled repos)
+- `port_accuracy_known >= 0.90`
 
    ```bash
    curl -X POST http://localhost:8080/feedback \

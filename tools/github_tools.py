@@ -3,14 +3,51 @@ from pydantic import BaseModel, Field
 from typing import Optional
 import requests
 
+
+ROOT_MARKDOWN_FILES = {
+    "readme.md",
+    "deployment.md",
+    "deploy.md",
+    "architecture.md",
+    "overview.md",
+    "setup.md",
+}
+
+PACKAGE_MARKDOWN_FILES = ROOT_MARKDOWN_FILES | {
+    "notes.md",
+    "runbook.md",
+}
+
 class RepoScanInput(BaseModel):
     repo_url: str = Field(..., description="Full GitHub repo URL")
     github_token: Optional[str] = Field(None, description="Optional GitHub token (required for private repos)")
     max_files: Optional[int] = Field(20, description="Max files to analyze")
     package_path: str = Field(".", description="Sub-package path to analyze, '.' for entire repo")
 
-@tool(args_schema=RepoScanInput)
-def fetch_repo_structure(repo_url: str, github_token: Optional[str] = None, max_files: Optional[int] = 20, package_path: str = ".") -> dict:
+
+def _normalize_path(value: str) -> str:
+    normalized = (value or ".").replace("\\", "/").strip().strip("/")
+    if normalized.startswith("./"):
+        normalized = normalized[2:]
+    return normalized or "."
+
+
+def _is_relevant_markdown_file(path: str, package_path: str) -> bool:
+    normalized_path = _normalize_path(path)
+    lower_path = normalized_path.lower()
+    if not lower_path.endswith(".md"):
+        return False
+
+    file_name = lower_path.rsplit("/", 1)[-1]
+    normalized_package_path = _normalize_path(package_path)
+
+    if normalized_package_path == ".":
+        return "/" not in lower_path and file_name in ROOT_MARKDOWN_FILES
+
+    parent_path = lower_path.rsplit("/", 1)[0] if "/" in lower_path else "."
+    return parent_path == normalized_package_path.lower() and file_name in PACKAGE_MARKDOWN_FILES
+
+def fetch_repo_structure_impl(repo_url: str, github_token: Optional[str] = None, max_files: Optional[int] = 20, package_path: str = ".") -> dict:
     """Fetch repo metadata, file tree, and key file contents for deploy analysis."""
     repo = repo_url.split("github.com/")[1].rstrip("/")
 
@@ -46,16 +83,22 @@ def fetch_repo_structure(repo_url: str, github_token: Optional[str] = None, max_
 
     # Validate package_path exists if not root
     if package_path != ".":
+        normalized_package_path = _normalize_path(package_path)
         package_exists = any(
-            item["type"] == "tree" and item["path"].rstrip("/") == package_path.rstrip("/")
+            item["type"] == "tree" and _normalize_path(item["path"]) == normalized_package_path
             for item in all_items
         )
         if not package_exists:
             return {"error": f"Package path '{package_path}' not found in repository"}
         
         # Filter tree items to only those under package_path
-        prefix = package_path.rstrip("/") + "/"
-        all_items = [item for item in all_items if item["path"].startswith(prefix) or item["path"] == package_path.rstrip("/")]
+        prefix = normalized_package_path + "/"
+        all_items = [
+            item
+            for item in all_items
+            if _normalize_path(item["path"]).startswith(prefix)
+            or _normalize_path(item["path"]) == normalized_package_path
+        ]
 
     key_filenames = [
         "package.json",
@@ -80,8 +123,9 @@ def fetch_repo_structure(repo_url: str, github_token: Optional[str] = None, max_
             path_name.startswith("Dockerfile.") or 
             path_name.endswith(".Dockerfile")
         )
+        is_relevant_markdown = _is_relevant_markdown_file(item["path"], package_path)
         
-        if item["type"] == "blob" and is_key_file:
+        if item["type"] == "blob" and (is_key_file or is_relevant_markdown):
             content_url = f"https://raw.githubusercontent.com/{repo}/{meta['default_branch']}/{item['path']}"
             key_files[item["path"]] = requests.get(content_url, headers=headers).text[:10000]
             count += 1
@@ -95,3 +139,8 @@ def fetch_repo_structure(repo_url: str, github_token: Optional[str] = None, max_
         "dirs": [i["path"] for i in all_items if i["type"] == "tree"][:20],
     }
     return result
+
+@tool(args_schema=RepoScanInput)
+def fetch_repo_structure(repo_url: str, github_token: Optional[str] = None, max_files: Optional[int] = 20, package_path: str = ".") -> dict:
+    """Fetch repo metadata, file tree, and key file contents for deploy analysis."""
+    return fetch_repo_structure_impl(repo_url, github_token, max_files, package_path)

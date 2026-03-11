@@ -346,6 +346,7 @@ def test_examples_preview_success(monkeypatch):
     assert response.json()["examples"][0]["source_repo"] == "acme/repo"
     assert called["artifact_type"] == "dockerfile"
     assert called["detected_stack"] == "FastAPI"
+    assert called["stack_tokens"] == []
     assert called["service"] == {"name": "api", "build_context": "."}
     assert called["limit"] == 2
 

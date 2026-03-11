@@ -51,7 +51,7 @@ Return ONLY raw JSON with this exact schema and no markdown:
 {
     "is_deployable": boolean,
     "error_reason": "string",
-    "detected_stack": "string",
+    "stack_tokens": ["string"],
     "services": [
         {
             "name": "string",

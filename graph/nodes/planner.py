@@ -1,8 +1,16 @@
 from typing import Dict, Any, List
 from pydantic import BaseModel, Field
 import json
+import os
 from .llm_config import llm_planner, RETRY_CONFIGS, FALLBACK_PROMPTS
 from graph.llm_retry import invoke_with_retry
+from tools.port_and_stack_extractor import extract_port_and_stack
+from tools.stack_tokens import (
+    KNOWN_STACK_TOKENS,
+    normalize_stack_tokens,
+    render_stack_summary,
+    unknown_stack_tokens,
+)
 
 
 class ServiceInfo(BaseModel):
@@ -14,7 +22,7 @@ class ServiceInfo(BaseModel):
 class PlannerOutput(BaseModel):
     is_deployable: bool = Field(description="Whether this repo can be deployed as a web service. False for mobile apps, doc-only repos, CLI tools, etc.")
     error_reason: str = Field(default="", description="Why the repo is not deployable (empty string if deployable)")
-    detected_stack: str = Field(description="Description of the tech stack, e.g. 'Next.js React app with WebSocket server'")
+    stack_tokens: List[str] = Field(description="Canonical stack tokens selected only from the allowed registry")
     services: List[ServiceInfo] = Field(description="List of services to build and deploy from this repo")
     has_existing_dockerfiles: bool = Field(description="Whether the repo already contains Dockerfile(s)")
     has_existing_compose: bool = Field(description="Whether the repo already contains a docker-compose.yml")
@@ -91,9 +99,40 @@ def _is_mobile_service(service: ServiceInfo, scan: Dict[str, Any]) -> bool:
 def planner_node(state: Dict[str, Any]) -> Dict[str, Any]:
     """Infer stack, services, and deployability from repo_scan using structured output."""
     scan = state.get("repo_scan", {})
+    repo_url = state.get("repo_url", "")
+    package_path = state.get("package_path", ".")
+    
+    # Extract ports and stack tokens from cloned repo for deterministic signal
+    extraction_result = {}
+    if repo_url:
+        try:
+            github_token = os.getenv("GITHUB_TOKEN")
+            extraction_result = extract_port_and_stack(
+                repo_url,
+                build_context=package_path,
+                timeout=30,
+                github_token=github_token
+            )
+        except Exception as e:
+            print(f"Warning: Port/stack extraction failed (proceeding with LLM only): {e}")
+            extraction_result = {"success": False, "error": str(e)}
+    
+    extracted_port = extraction_result.get("port")
+    extracted_stack_tokens = extraction_result.get("stack_tokens", [])
+    extraction_context = ""
+    if extraction_result.get("success") and extracted_stack_tokens:
+        extraction_context = f"""
+DETERMINISTIC STACK SIGNAL (from cloned repo analysis):
+- Detected runtimes/frameworks: {', '.join(extracted_stack_tokens)}
+Prefer these tokens unless the repo scan clearly supports additional allowed tokens.
+"""
+
+    allowed_stack_tokens = ", ".join(sorted(KNOWN_STACK_TOKENS))
 
     prompt = f"""
 You are a DevOps architect analyzing a repository for deployment.
+
+{extraction_context}
 
 Given this repo scan:
 {json.dumps(scan, indent=2)}
@@ -111,7 +150,10 @@ Tasks:
    - If the repo has existing Dockerfile(s) in key_files, map each Dockerfile to its corresponding service using the dockerfile_path field (e.g. 'Dockerfile' for the main app, 'Dockerfile.websocket' for the websocket service)
    - Check if the repo already has a docker-compose.yml/yaml in key_files
 
-3. Describe the overall tech stack.
+3. Return stack_tokens using ONLY canonical tokens from this allowed set:
+    {allowed_stack_tokens}
+
+4. Do not invent frameworks or tools. If a token is not strongly supported by repo evidence, leave it out.
 
 IMPORTANT: Look at the directory structure and key_files carefully. If there are multiple package.json or requirements.txt files in different directories, this is likely a monorepo with multiple services.
 """
@@ -121,7 +163,7 @@ Respond ONLY with a raw JSON object matching this schema. Do not include markdow
 {
   "is_deployable": boolean,
   "error_reason": "string (empty if deployable)",
-  "detected_stack": "string",
+    "stack_tokens": ["string"],
   "services": [
     {
       "name": "string",
@@ -145,6 +187,13 @@ Respond ONLY with a raw JSON object matching this schema. Do not include markdow
 
             content = re.sub(r"^```(?:json)?\s*\n(.*?)\n```$", r"\1", content, flags=re.DOTALL)
         json_data = json.loads(content)
+        raw_tokens = json_data.get("stack_tokens") or []
+        if not isinstance(raw_tokens, list):
+            raise ValueError("stack_tokens must be a list")
+        invalid_tokens = unknown_stack_tokens(raw_tokens)
+        if invalid_tokens:
+            raise ValueError(f"Unknown stack tokens: {', '.join(invalid_tokens)}")
+        json_data["stack_tokens"] = normalize_stack_tokens(raw_tokens)
         return PlannerOutput(**json_data)
 
     try:
@@ -166,12 +215,20 @@ Respond ONLY with a raw JSON object matching this schema. Do not include markdow
             state["error"] = "No web-deployable services found. Repository appears to contain only mobile or non-deployable packages."
             return state
         
-        state["detected_stack"] = data.detected_stack
+        # Carefully override ports only for single-service repos with high-confidence extraction
+        if len(filtered_services) == 1 and extracted_port and extraction_result.get("port_confidence", 0) >= 0.65:
+            filtered_services[0].port = extracted_port
+        
+        combined_stack_tokens = normalize_stack_tokens([*data.stack_tokens, *extracted_stack_tokens])
+
+        state["stack_tokens"] = combined_stack_tokens
+        state["detected_stack"] = render_stack_summary(combined_stack_tokens)
         state["services"] = [s.model_dump() for s in filtered_services]
         state["has_existing_dockerfiles"] = data.has_existing_dockerfiles
         state["has_existing_compose"] = data.has_existing_compose
         state["planner_retry_attempts"] = attempts_used
         state["planner_fallback_used"] = fallback_used
+        state["extraction_result"] = extraction_result
     except Exception as e:
         error_details = str(e)
         state["error"] = f"Failed to analyze repository: {error_details}"

@@ -26,7 +26,7 @@ def test_planner_retries_and_recovers(monkeypatch):
         payload = {
             "is_deployable": True,
             "error_reason": "",
-            "detected_stack": "Python API",
+            "stack_tokens": ["python", "fastapi"],
             "services": [
                 {
                     "name": "api",
@@ -52,7 +52,8 @@ def test_planner_retries_and_recovers(monkeypatch):
     out = planner_node(state)
 
     assert "error" not in out
-    assert out["detected_stack"] == "Python API"
+    assert out["stack_tokens"] == ["python", "fastapi"]
+    assert out["detected_stack"] == "Python, FastAPI"
     assert out["planner_retry_attempts"] == 2
     assert out["planner_fallback_used"] is False
 

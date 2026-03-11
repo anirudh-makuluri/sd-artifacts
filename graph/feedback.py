@@ -367,6 +367,7 @@ def build_feedback_initial_state(cached_result: Dict[str, Any], feedback: str) -
         "cached_result": cached_result,
         "commit_sha": cached_result.get("commit_sha", "unknown"),
         "detected_stack": cached_result.get("stack_summary", "unknown"),
+        "stack_tokens": cached_result.get("stack_tokens", []),
         "services": cached_result.get("services", []),
         "dockerfiles": dict(cached_result.get("dockerfiles", {})),
         "docker_compose": cached_result.get("docker_compose") or "",
@@ -381,6 +382,7 @@ def format_feedback_result(result: Dict[str, Any]) -> Dict[str, Any]:
     return {
         "commit_sha": result.get("commit_sha", "unknown"),
         "stack_summary": result.get("detected_stack", "unknown"),
+        "stack_tokens": result.get("stack_tokens", []),
         "services": result.get("services", []),
         "dockerfiles": result.get("dockerfiles", {}),
         "docker_compose": result.get("docker_compose"),

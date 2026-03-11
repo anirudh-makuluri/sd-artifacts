@@ -27,6 +27,7 @@ def compose_generator_node(state: Dict[str, Any]) -> Dict[str, Any]:
     examples = fetch_reference_examples(
         artifact_type="compose",
         detected_stack=state.get("detected_stack", "unknown"),
+        stack_tokens=state.get("stack_tokens", []),
         service=None,
         limit=3,
     )

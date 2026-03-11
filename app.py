@@ -1,7 +1,7 @@
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import StreamingResponse
 import json
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from typing import Optional, List, Dict
 from graph.graph import graph
 from graph.nodes.llm_config import TokenTracker
@@ -37,6 +37,7 @@ class TokenUsage(BaseModel):
 class AnalyzeResponse(BaseModel):
     commit_sha: str = "unknown"
     stack_summary: str
+    stack_tokens: List[str] = Field(default_factory=list)
     services: List[Dict]
     dockerfiles: Dict[str, str]
     docker_compose: Optional[str] = None
@@ -66,6 +67,7 @@ class SeedExampleBankResponse(BaseModel):
 class PreviewExamplesRequest(BaseModel):
     artifact_type: str
     detected_stack: str
+    stack_tokens: List[str] = Field(default_factory=list)
     service: Optional[Dict[str, str]] = None
     limit: int = 3
 
@@ -143,6 +145,7 @@ async def analyze_repo(req: AnalyzeRequest):
     response = AnalyzeResponse(
         commit_sha=commit_sha,
         stack_summary=result.get("detected_stack", "Unknown"),
+        stack_tokens=result.get("stack_tokens", []),
         services=result.get("services", []),
         dockerfiles=result.get("dockerfiles", {}),
         docker_compose=result.get("docker_compose"),
@@ -209,6 +212,7 @@ async def preview_example_bank_matches(req: PreviewExamplesRequest):
     examples = fetch_reference_examples(
         artifact_type=req.artifact_type,
         detected_stack=req.detected_stack,
+        stack_tokens=req.stack_tokens,
         service=req.service,
         limit=req.limit,
     )
@@ -291,6 +295,7 @@ async def analyze_repo_stream(req: AnalyzeRequest):
             response = AnalyzeResponse(
                 commit_sha=full_state.get("commit_sha", "unknown"),
                 stack_summary=full_state.get("detected_stack", "Unknown"),
+                stack_tokens=full_state.get("stack_tokens", []),
                 services=full_state.get("services", []),
                 dockerfiles=full_state.get("dockerfiles", {}),
                 docker_compose=full_state.get("docker_compose"),
@@ -352,6 +357,7 @@ async def improve_with_feedback(req: FeedbackRequest):
     response = AnalyzeResponse(
         commit_sha=req.commit_sha,
         stack_summary=improved["stack_summary"],
+        stack_tokens=improved.get("stack_tokens", []),
         services=improved["services"],
         dockerfiles=improved["dockerfiles"],
         docker_compose=improved.get("docker_compose"),
@@ -418,6 +424,7 @@ async def improve_with_feedback_stream(req: FeedbackRequest):
             response = AnalyzeResponse(
                 commit_sha=req.commit_sha,
                 stack_summary=improved["stack_summary"],
+                stack_tokens=improved.get("stack_tokens", []),
                 services=improved["services"],
                 dockerfiles=improved["dockerfiles"],
                 docker_compose=improved.get("docker_compose"),

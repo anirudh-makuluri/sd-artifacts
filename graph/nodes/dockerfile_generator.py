@@ -28,6 +28,7 @@ def dockerfile_generator_node(state: Dict[str, Any]) -> Dict[str, Any]:
             examples = fetch_reference_examples(
                 artifact_type="dockerfile",
                 detected_stack=state.get("detected_stack", "unknown"),
+                stack_tokens=state.get("stack_tokens", []),
                 service=service,
                 limit=3,
             )
@@ -64,6 +65,7 @@ Rules:
             examples = fetch_reference_examples(
                 artifact_type="dockerfile",
                 detected_stack=state.get("detected_stack", "unknown"),
+                stack_tokens=state.get("stack_tokens", []),
                 service=service,
                 limit=3,
             )

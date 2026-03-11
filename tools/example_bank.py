@@ -5,6 +5,7 @@ import re
 import requests
 
 from db import supabase
+from tools.stack_tokens import normalize_stack_token, normalize_stack_tokens
 
 
 POPULAR_EXAMPLE_REPOS = [
@@ -83,7 +84,8 @@ def _infer_tags(path: str, content: str) -> List[str]:
     if "user " in haystack:
         tags.add("nonroot")
 
-    return sorted(tags)
+    normalized_tags = {normalize_stack_token(tag) for tag in tags}
+    return sorted(normalized_tags)
 
 
 def _quality_score(content: str) -> float:
@@ -220,8 +222,10 @@ def seed_example_bank_from_repos(
     }
 
 
-def _query_tags(detected_stack: str, service: Optional[Dict[str, Any]]) -> List[str]:
-    tokens = set(_tokenize(detected_stack))
+def _query_tags(detected_stack: str, service: Optional[Dict[str, Any]], stack_tokens: Optional[List[str]] = None) -> List[str]:
+    tokens = set(normalize_stack_tokens(stack_tokens or []))
+    if not tokens:
+        tokens = set(_tokenize(detected_stack))
     if service:
         tokens.update(_tokenize(service.get("name", "")))
         tokens.update(_tokenize(service.get("build_context", "")))
@@ -244,6 +248,7 @@ def fetch_reference_examples(
     artifact_type: str,
     detected_stack: str,
     service: Optional[Dict[str, Any]] = None,
+    stack_tokens: Optional[List[str]] = None,
     limit: int = 3,
 ) -> List[Dict[str, Any]]:
     """Fetch and rank active examples from Supabase for prompt grounding."""
@@ -264,10 +269,10 @@ def fetch_reference_examples(
     except Exception:
         return []
 
-    query_tokens = set(_query_tags(detected_stack, service))
+    query_tokens = set(_query_tags(detected_stack, service, stack_tokens))
     ranked: List[tuple[float, Dict[str, Any]]] = []
     for row in rows:
-        tags = set((row.get("stack_tags") or []))
+        tags = {normalize_stack_token(tag) for tag in (row.get("stack_tags") or [])}
         overlap = len(tags.intersection(query_tokens))
         quality = float(row.get("quality_score") or 0.0)
         score = quality + (overlap * 0.12)
