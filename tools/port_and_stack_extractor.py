@@ -238,32 +238,42 @@ def _extract_ports_from_config_files(repo_dir: str, build_context: str = ".") ->
     if not context_path.exists():
         context_path = Path(repo_dir)
     
-    config_files = [
-        "next.config.js",
-        "nuxt.config.js",
-        "vite.config.js",
-        "webpack.config.js",
-        "gulpfile.js",
+    candidate_files = {
+        context_path / "next.config.js",
+        context_path / "nuxt.config.js",
+        context_path / "vite.config.js",
+        context_path / "webpack.config.js",
+        context_path / "gulpfile.js",
+        context_path / "config.js",
+        context_path / "config.cjs",
+        context_path / "config.mjs",
+    }
+
+    # Common backend patterns keep port in config/*.js.
+    candidate_files.update(context_path.glob("config/*.js"))
+    candidate_files.update(context_path.glob("config/*.cjs"))
+    candidate_files.update(context_path.glob("config/*.mjs"))
+
+    port_patterns = [
+        r"\bport\s*[:=]\s*(\d{2,5})\b",
+        r"\bPORT\s*[:=]\s*(\d{2,5})\b",
+        r"server.*port\s*[:=]\s*(\d{2,5})",
+        r"listen['\"]?\s*:\s*(\d{2,5})",
+        r"process\.env\.PORT\s*\|\|\s*(\d{2,5})",
+        r"process\.env\.PORT\s*\?\?\s*(\d{2,5})",
+        r"process\.env\[['\"]PORT['\"]\]\s*\|\|\s*(\d{2,5})",
     ]
-    
-    for config_name in config_files:
-        config_file = context_path / config_name
-        if config_file.exists():
-            try:
-                content = config_file.read_text(encoding="utf-8", errors="ignore")
-                # Look for port patterns
-                port_patterns = [
-                    r"port\s*[:=]\s*(\d+)",
-                    r"server.*port\s*[:=]\s*(\d+)",
-                    r"listen['\"]?\s*:\s*(\d+)",
-                ]
-                for pattern in port_patterns:
-                    match = re.search(pattern, content, re.IGNORECASE)
-                    if match:
-                        port = int(match.group(1))
-                        ports.append((port, 0.65))  # Medium confidence
-            except Exception:
-                pass
+
+    for config_file in candidate_files:
+        if not config_file.exists() or not config_file.is_file():
+            continue
+        try:
+            content = config_file.read_text(encoding="utf-8", errors="ignore")
+            for pattern in port_patterns:
+                for match in re.finditer(pattern, content, re.IGNORECASE):
+                    ports.append((int(match.group(1)), 0.72))
+        except Exception:
+            pass
     
     return ports
 

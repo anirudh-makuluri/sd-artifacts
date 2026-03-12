@@ -2,6 +2,7 @@ import json
 
 from tools.port_and_stack_extractor import _default_port_from_stack_tokens, _extract_stack_tokens
 from tools.port_and_stack_extractor import _extract_ports_from_package_json
+from tools.port_and_stack_extractor import _extract_ports_from_config_files
 
 
 def test_default_port_prefers_vite_over_generic_frontend_tokens():
@@ -189,3 +190,27 @@ def test_extract_stack_tokens_inferrs_uvicorn_for_fastapi_python(tmp_path):
     assert "python" in tokens
     assert "fastapi" in tokens
     assert "uvicorn" in tokens
+
+
+def test_extract_ports_from_generic_config_js(tmp_path):
+    config_js = tmp_path / "config.js"
+    config_js.write_text(
+        "module.exports = { port: 5000 }",
+        encoding="utf-8",
+    )
+
+    ports = _extract_ports_from_config_files(str(tmp_path), build_context=".")
+
+    assert (5000, 0.72) in ports
+
+
+def test_extract_ports_from_config_js_env_fallback(tmp_path):
+    config_js = tmp_path / "config.js"
+    config_js.write_text(
+        "const PORT = process.env.PORT || 8000;",
+        encoding="utf-8",
+    )
+
+    ports = _extract_ports_from_config_files(str(tmp_path), build_context=".")
+
+    assert (8000, 0.72) in ports
