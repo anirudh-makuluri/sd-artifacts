@@ -1,11 +1,13 @@
 import json
 
 from tools.evaluate_scan_quality import (
+    _build_artifact_summary,
     _build_repo_report,
     _failure_bucket_from_report,
     _load_labels,
     _select_compose_file,
     _select_dockerfile,
+    _select_nginx_file,
 )
 
 
@@ -149,6 +151,22 @@ services:
     ports:
       - \"3000:3000\"
 """,
+                        "nginx.conf": """
+events { worker_connections 1024; }
+http {
+    server {
+        location / {
+            proxy_pass http://web:3000;
+            proxy_http_version 1.1;
+            proxy_set_header Upgrade $http_upgrade;
+            proxy_set_header Connection \"upgrade\";
+            add_header X-Content-Type-Options \"nosniff\" always;
+            add_header X-Frame-Options \"SAMEORIGIN\" always;
+            add_header Content-Security-Policy \"default-src 'self'\" always;
+        }
+    }
+}
+""",
         },
     }
     label = {
@@ -172,6 +190,12 @@ services:
     assert "criteria_scores" in dockerfile
     assert "criterion_reasons" in dockerfile
 
+    nginx = report["artifact_scores"]["nginx"]
+    assert nginx["file_path"] == "nginx.conf"
+    assert nginx["total_score"] > 0.0
+    assert "criteria_scores" in nginx
+    assert "criterion_reasons" in nginx
+
 
 def test_select_dockerfile_prefers_package_local_file():
     key_files = {
@@ -183,3 +207,42 @@ def test_select_dockerfile_prefers_package_local_file():
 
     assert selected_path == "apps/web/Dockerfile"
     assert "EXPOSE 3000" in selected_content
+
+
+def test_select_nginx_file_prefers_package_local_file():
+    key_files = {
+        "nginx.conf": "events {}",
+        "apps/web/nginx/default.conf": "events {}\nhttp { server { location / { proxy_pass http://web:3000; } } }",
+    }
+
+    selected_path, selected_content = _select_nginx_file(key_files, "apps/web")
+
+    assert selected_path == "apps/web/nginx/default.conf"
+    assert "proxy_pass" in selected_content
+
+
+def test_build_artifact_summary_includes_nginx_and_combined():
+    scored_reports = [
+        {
+            "artifact_scores": {
+                "dockerfile": {"file_path": "Dockerfile", "total_score": 1.0, "passed_threshold": True},
+                "compose": {"file_path": "docker-compose.yml", "total_score": 0.9, "passed_threshold": True},
+                "nginx": {"file_path": "nginx.conf", "total_score": 0.8, "passed_threshold": False},
+            }
+        },
+        {
+            "artifact_scores": {
+                "dockerfile": {"file_path": None, "total_score": 0.0, "passed_threshold": False},
+                "compose": {"file_path": "compose.yml", "total_score": 1.0, "passed_threshold": True},
+                "nginx": {"file_path": "default.conf", "total_score": 1.0, "passed_threshold": True},
+            }
+        },
+    ]
+
+    summary = _build_artifact_summary(scored_reports)
+
+    assert summary["dockerfile"]["scored_repo_count"] == 1
+    assert summary["compose"]["scored_repo_count"] == 2
+    assert summary["nginx"]["scored_repo_count"] == 2
+    assert summary["combined"]["scored_repo_count"] == 2
+    assert summary["combined"]["all_present_artifacts_pass_rate"] == 0.5

@@ -20,7 +20,7 @@ if PROJECT_ROOT not in sys.path:
 
 from graph.nodes import planner_node
 from tools.benchmark_storage import save_benchmark_artifact, save_benchmark_artifact_from_path
-from tools.eval_metrics import ARTIFACT_PASS_THRESHOLDS, score_compose, score_dockerfile, score_repo, summarize_scores
+from tools.eval_metrics import ARTIFACT_PASS_THRESHOLDS, score_compose, score_dockerfile, score_nginx, score_repo, summarize_scores
 from tools.github_tools import fetch_repo_structure_impl
 
 
@@ -190,6 +190,51 @@ def _select_dockerfile(key_files: Dict[str, str], package_path: str) -> tuple[Op
     return selected_path, selected_content
 
 
+def _select_nginx_file(key_files: Dict[str, str], package_path: str) -> tuple[Optional[str], str]:
+    if not key_files:
+        return None, ""
+
+    normalized_package = (package_path or ".").replace("\\", "/").strip("/")
+
+    candidate_filenames = {
+        "nginx.conf",
+        "default.conf",
+    }
+    candidate_suffixes = (
+        ".nginx.conf",
+    )
+
+    candidates: List[tuple[int, str, str]] = []
+    for path, content in key_files.items():
+        normalized_path = (path or "").replace("\\", "/")
+        filename = normalized_path.rsplit("/", 1)[-1]
+        is_nginx = (
+            filename in candidate_filenames
+            or filename.endswith(candidate_suffixes)
+            or "/nginx/" in f"/{normalized_path.lower()}/"
+        )
+        if not is_nginx:
+            continue
+
+        if normalized_package and normalized_package != ".":
+            prefix = f"{normalized_package}/"
+            if normalized_path.startswith(prefix):
+                priority = 0
+            else:
+                priority = 2
+        else:
+            priority = 0 if "/" not in normalized_path else 1
+
+        candidates.append((priority, normalized_path, content or ""))
+
+    if not candidates:
+        return None, ""
+
+    candidates.sort(key=lambda item: (item[0], item[1]))
+    _, selected_path, selected_content = candidates[0]
+    return selected_path, selected_content
+
+
 def _build_repo_report(repo_result: Dict[str, Any], label: Dict[str, Any]) -> Dict[str, Any]:
     score = score_repo(
         repo=repo_result["repo"],
@@ -217,6 +262,14 @@ def _build_repo_report(repo_result: Dict[str, Any], label: Dict[str, Any]) -> Di
     dockerfile_score = score_dockerfile(
         dockerfile_content,
         required_stack_tokens=label.get("required_stack_tokens", []),
+    )
+    nginx_path, nginx_content = _select_nginx_file(
+        repo_result.get("key_files", {}),
+        repo_result.get("package_path", "."),
+    )
+    nginx_score = score_nginx(
+        nginx_content,
+        expected_services=label.get("expected_services", []),
     )
 
     report = {
@@ -267,11 +320,76 @@ def _build_repo_report(repo_result: Dict[str, Any], label: Dict[str, Any]) -> Di
                 "passed_threshold": compose_score.passed_threshold,
                 "criteria_scores": compose_score.criteria_scores,
                 "criterion_reasons": compose_score.criterion_reasons,
+            },
+            "nginx": {
+                "file_path": nginx_path,
+                "total_score": nginx_score.total_score,
+                "passed_threshold": nginx_score.passed_threshold,
+                "criteria_scores": nginx_score.criteria_scores,
+                "criterion_reasons": nginx_score.criterion_reasons,
             }
         },
     }
     report["failure_bucket"] = _failure_bucket_from_report(report)
     return report
+
+
+def _build_artifact_summary(scored_reports: List[Dict[str, Any]]) -> Dict[str, Any]:
+    per_artifact: Dict[str, Dict[str, Any]] = {}
+    combined_scores: List[float] = []
+    combined_passes = 0
+    artifact_order = ["dockerfile", "compose", "nginx"]
+
+    for artifact in artifact_order:
+        scores: List[float] = []
+        passes = 0
+        for report in scored_reports:
+            artifacts = report.get("artifact_scores") or {}
+            result = artifacts.get(artifact) or {}
+            file_path = result.get("file_path")
+            total_score = result.get("total_score")
+            if file_path and isinstance(total_score, (int, float)):
+                scores.append(float(total_score))
+                if bool(result.get("passed_threshold")):
+                    passes += 1
+
+        count = len(scores)
+        per_artifact[artifact] = {
+            "scored_repo_count": count,
+            "avg_total_score": (sum(scores) / count) if count else 0.0,
+            "pass_rate": (passes / count) if count else 0.0,
+            "pass_threshold": ARTIFACT_PASS_THRESHOLDS[artifact],
+        }
+
+    for report in scored_reports:
+        artifacts = report.get("artifact_scores") or {}
+        current_scores: List[float] = []
+        current_pass = True
+        for artifact in artifact_order:
+            result = artifacts.get(artifact) or {}
+            file_path = result.get("file_path")
+            total_score = result.get("total_score")
+            if not file_path or not isinstance(total_score, (int, float)):
+                continue
+            current_scores.append(float(total_score))
+            if not bool(result.get("passed_threshold")):
+                current_pass = False
+
+        if not current_scores:
+            continue
+        combined = sum(current_scores) / len(current_scores)
+        combined_scores.append(combined)
+        if current_pass:
+            combined_passes += 1
+
+    combined_count = len(combined_scores)
+    per_artifact["combined"] = {
+        "scored_repo_count": combined_count,
+        "avg_total_score": (sum(combined_scores) / combined_count) if combined_count else 0.0,
+        "all_present_artifacts_pass_rate": (combined_passes / combined_count) if combined_count else 0.0,
+    }
+
+    return per_artifact
 
 
 def _failure_bucket_from_report(report: Dict[str, Any]) -> str:
@@ -390,45 +508,7 @@ def run() -> int:
         failure_buckets[bucket] = failure_buckets.get(bucket, 0) + 1
     summary["failure_buckets"] = failure_buckets
 
-    compose_scores = []
-    compose_passes = 0
-    dockerfile_scores = []
-    dockerfile_passes = 0
-    for report in scored_reports:
-        artifacts = report.get("artifact_scores") or {}
-
-        compose = (artifacts.get("compose") or {})
-        compose_file_path = compose.get("file_path")
-        compose_total_score = compose.get("total_score")
-        if compose_file_path and isinstance(compose_total_score, (int, float)):
-            compose_scores.append(float(compose_total_score))
-            if bool(compose.get("passed_threshold")):
-                compose_passes += 1
-
-        dockerfile = (artifacts.get("dockerfile") or {})
-        dockerfile_file_path = dockerfile.get("file_path")
-        dockerfile_total_score = dockerfile.get("total_score")
-        if dockerfile_file_path and isinstance(dockerfile_total_score, (int, float)):
-            dockerfile_scores.append(float(dockerfile_total_score))
-            if bool(dockerfile.get("passed_threshold")):
-                dockerfile_passes += 1
-
-    compose_count = len(compose_scores)
-    dockerfile_count = len(dockerfile_scores)
-    summary["artifact_summary"] = {
-        "dockerfile": {
-            "scored_repo_count": dockerfile_count,
-            "avg_total_score": (sum(dockerfile_scores) / dockerfile_count) if dockerfile_count else 0.0,
-            "pass_rate": (dockerfile_passes / dockerfile_count) if dockerfile_count else 0.0,
-            "pass_threshold": ARTIFACT_PASS_THRESHOLDS["dockerfile"],
-        },
-        "compose": {
-            "scored_repo_count": compose_count,
-            "avg_total_score": (sum(compose_scores) / compose_count) if compose_count else 0.0,
-            "pass_rate": (compose_passes / compose_count) if compose_count else 0.0,
-            "pass_threshold": ARTIFACT_PASS_THRESHOLDS["compose"],
-        }
-    }
+    summary["artifact_summary"] = _build_artifact_summary(scored_reports)
 
     report = {
         "run_id": run_id,
