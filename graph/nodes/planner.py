@@ -168,6 +168,58 @@ def _scan_has_existing_compose(scan: Dict[str, Any]) -> bool:
     return False
 
 
+def _detect_workspace_sub_packages(scan: Dict[str, Any], package_path: str) -> List[str]:
+    """Detect workspace sub-package directories for pnpm/yarn/npm workspaces monorepos.
+
+    Returns relative paths (from package_path) of directories that contain their own
+    package.json, indicating a monorepo layout.  Empty list if not a workspace monorepo.
+    """
+    key_files = scan.get("key_files", {})
+    if not isinstance(key_files, dict):
+        return []
+
+    package_norm = _normalize_ctx(package_path)
+
+    # Strong monorepo signals: pnpm-lock.yaml, pnpm-workspace.yaml, or lerna.json at root
+    workspace_signals = {"pnpm-lock.yaml", "pnpm-workspace.yaml", "lerna.json"}
+    has_workspace_file = False
+    for file_path in key_files:
+        norm = _normalize_ctx(str(file_path))
+        # Only count root-level (relative to package_path) signals
+        if package_norm == ".":
+            depth = norm.count("/")
+        else:
+            if not norm.startswith(package_norm + "/"):
+                continue
+            rel = norm[len(package_norm) + 1:]
+            depth = rel.count("/")
+            norm = rel
+        if depth == 0 and norm.split("/")[-1] in workspace_signals:
+            has_workspace_file = True
+            break
+
+    # Also check root package.json for workspaces field
+    if not has_workspace_file:
+        root_pkg_key = "package.json" if package_norm == "." else f"{package_norm}/package.json"
+        root_pkg_content = key_files.get(root_pkg_key, "")
+        if '"workspaces"' not in root_pkg_content:
+            return []
+
+    # Collect all subdirectories that have their own package.json
+    sub_pkg_dirs: set = set()
+    for file_path in key_files:
+        norm = _normalize_ctx(str(file_path))
+        if package_norm != ".":
+            if not norm.startswith(package_norm + "/"):
+                continue
+            norm = norm[len(package_norm) + 1:]
+        if norm.split("/")[-1] == "package.json" and "/" in norm:
+            parent = "/".join(norm.split("/")[:-1])
+            sub_pkg_dirs.add(parent)
+
+    return sorted(sub_pkg_dirs)
+
+
 def _apply_deterministic_fallback(
     state: Dict[str, Any],
     scan: Dict[str, Any],
@@ -260,13 +312,29 @@ DETERMINISTIC STACK SIGNAL (from cloned repo analysis):
 Prefer these tokens unless the repo scan clearly supports additional allowed tokens.
 """
 
+    # Detect workspace monorepo sub-packages for an explicit prompt hint
+    workspace_sub_packages = _detect_workspace_sub_packages(scan, package_path)
+    monorepo_context = ""
+    if workspace_sub_packages:
+        monorepo_context = f"""
+WORKSPACE MONOREPO DETECTED:
+The following sub-directories each contain their own package.json (workspace packages):
+{chr(10).join(f"  - {p}" for p in workspace_sub_packages)}
+
+IMPORTANT: This is a workspace monorepo. You MUST:
+  1. Treat each sub-directory above as a separate service with its own build_context.
+  2. DO NOT use "." as the build_context for any service — the root is just a workspace orchestrator.
+  3. Exclude any packages with mobile markers (mobile, android, ios, expo, react-native, flutter).
+  4. For each remaining package, infer its name and port from its contents in key_files.
+"""
+
     allowed_stack_tokens = ", ".join(sorted(KNOWN_STACK_TOKENS))
 
     prompt = f"""
 You are a DevOps architect analyzing a repository for deployment.
 
 {extraction_context}
-
+{monorepo_context}
 Given this repo scan:
 {json.dumps(scan, indent=2)}
 
@@ -325,7 +393,10 @@ Respond ONLY with a raw JSON object matching this schema. Do not include markdow
             raise ValueError("stack_tokens must be a list")
         invalid_tokens = unknown_stack_tokens(raw_tokens)
         if invalid_tokens:
-            raise ValueError(f"Unknown stack tokens: {', '.join(invalid_tokens)}")
+            # Strip unknown tokens but do NOT reject — services/ports are more critical
+            # than stack_token accuracy. A retry won't fix an LLM using a real framework
+            # name that's simply missing from our registry.
+            print(f"[planner] Stripping unknown stack tokens: {', '.join(invalid_tokens)}")
         json_data["stack_tokens"] = normalize_stack_tokens(raw_tokens)
         return PlannerOutput(**json_data)
 
@@ -359,8 +430,13 @@ Respond ONLY with a raw JSON object matching this schema. Do not include markdow
                 state["error"] = "No web-deployable services found. Repository appears to contain only mobile or non-deployable packages."
                 return state
         
-        # Carefully override ports only for single-service repos with high-confidence extraction
-        if len(filtered_services) == 1 and extracted_port and extraction_result.get("port_confidence", 0) >= 0.65:
+        # Carefully override ports only for single-service, non-monorepo repos with high-confidence extraction
+        if (
+            len(filtered_services) == 1
+            and not workspace_sub_packages
+            and extracted_port
+            and extraction_result.get("port_confidence", 0) >= 0.65
+        ):
             filtered_services[0].port = extracted_port
         
         combined_stack_tokens = normalize_stack_tokens([*data.stack_tokens, *extracted_stack_tokens])

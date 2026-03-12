@@ -182,6 +182,7 @@ KNOWN_STACK_TOKENS: Set[str] = {
     "ruby",
     "rust",
     "sequelize",
+    "socket.io",
     "sqlalchemy",
     "svelte",
     "streamlit",
