@@ -2,12 +2,15 @@ import json
 
 from tools.evaluate_scan_quality import (
     _build_artifact_summary,
+    _build_generated_artifact_scores,
     _build_repo_report,
+    _compose_generation_audit,
     _failure_bucket_from_report,
     _load_labels,
     _select_compose_file,
     _select_dockerfile,
     _select_nginx_file,
+    _summarize_compose_generation_audits,
 )
 
 
@@ -246,3 +249,134 @@ def test_build_artifact_summary_includes_nginx_and_combined():
     assert summary["nginx"]["scored_repo_count"] == 2
     assert summary["combined"]["scored_repo_count"] == 2
     assert summary["combined"]["all_present_artifacts_pass_rate"] == 0.5
+
+
+def test_build_generated_artifact_scores_handles_generated_content():
+        generated = {
+                "dockerfiles": {
+                        "web": "FROM node:20-alpine\nUSER node\nEXPOSE 3000\nHEALTHCHECK CMD wget -qO- http://localhost:3000 || exit 1",
+                        "api": "FROM python:3.12-slim\nUSER app\nEXPOSE 8000\nHEALTHCHECK CMD curl -f http://localhost:8000/health || exit 1",
+                },
+                "docker_compose": """
+services:
+    web:
+        build: .
+        ports:
+            - \"3000:3000\"
+""",
+                "nginx_conf": """
+events { worker_connections 1024; }
+http {
+    server {
+        location / {
+            proxy_pass http://web:3000;
+            proxy_http_version 1.1;
+            proxy_set_header Upgrade $http_upgrade;
+            proxy_set_header Connection \"upgrade\";
+            add_header X-Content-Type-Options \"nosniff\" always;
+            add_header X-Frame-Options \"SAMEORIGIN\" always;
+            add_header Content-Security-Policy \"default-src 'self'\" always;
+        }
+    }
+}
+""",
+        }
+        label = {
+                "expected_services": [{"name": "web", "build_context": "."}],
+                "required_stack_tokens": [],
+        }
+
+        scores = _build_generated_artifact_scores(generated, label)
+
+        assert scores["dockerfile"]["file_path"] == "__generated_dockerfiles__"
+        assert scores["compose"]["file_path"] == "__generated_docker_compose__"
+        assert scores["nginx"]["file_path"] == "__generated_nginx_conf__"
+        assert "web" in scores["dockerfile"]["per_service"]
+        assert "api" in scores["dockerfile"]["per_service"]
+
+
+def test_build_generated_artifact_scores_handles_missing_generated_content():
+        generated = {
+                "dockerfiles": {},
+                "docker_compose": "",
+                "nginx_conf": "",
+        }
+        label = {
+                "expected_services": [{"name": "web", "build_context": "."}],
+                "required_stack_tokens": ["node"],
+        }
+
+        scores = _build_generated_artifact_scores(generated, label)
+
+        assert scores["dockerfile"]["file_path"] is None
+        assert scores["dockerfile"]["total_score"] == 0.0
+        assert scores["compose"]["file_path"] is None
+        assert scores["compose"]["total_score"] == 0.0
+        assert scores["nginx"]["file_path"] is None
+        assert scores["nginx"]["total_score"] == 0.0
+
+
+def test_compose_generation_audit_detects_missing_when_required():
+    label = {
+        "expected_services": [
+            {"name": "web", "build_context": "."},
+            {"name": "api", "build_context": "./api"},
+        ]
+    }
+    generated_artifact_scores = {
+        "compose": {
+            "file_path": None,
+        }
+    }
+
+    audit = _compose_generation_audit(label, generated_artifact_scores)
+
+    assert audit["compose_required"] is True
+    assert audit["compose_generated"] is False
+    assert audit["wrong_compose_gen"] is True
+    assert audit["reason"] == "compose_missing_when_required"
+
+
+def test_compose_generation_audit_detects_generated_when_not_required():
+    label = {
+        "expected_services": [
+            {"name": "web", "build_context": "."},
+        ]
+    }
+    generated_artifact_scores = {
+        "compose": {
+            "file_path": "__generated_docker_compose__",
+        }
+    }
+
+    audit = _compose_generation_audit(label, generated_artifact_scores)
+
+    assert audit["compose_required"] is False
+    assert audit["compose_generated"] is True
+    assert audit["wrong_compose_gen"] is True
+    assert audit["reason"] == "compose_generated_when_not_required"
+
+
+def test_summarize_compose_generation_audits_counts_both_error_types():
+    audits = [
+        {
+            "wrong_compose_gen": True,
+            "reason": "compose_missing_when_required",
+        },
+        {
+            "wrong_compose_gen": True,
+            "reason": "compose_generated_when_not_required",
+        },
+        {
+            "wrong_compose_gen": False,
+            "reason": "ok",
+        },
+    ]
+
+    summary = _summarize_compose_generation_audits(audits)
+
+    assert summary["compose_generation_eval_repo_count"] == 3
+    assert summary["wrong_compose_gen_count"] == 2
+    assert summary["wrong_compose_gen_rate"] == 2 / 3
+    assert summary["compose_missing_when_required_count"] == 1
+    assert summary["compose_generated_when_not_required_count"] == 1

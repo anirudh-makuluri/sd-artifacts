@@ -18,7 +18,7 @@ PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 if PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
 
-from graph.nodes import planner_node
+from graph.nodes import compose_generator_node, dockerfile_generator_node, nginx_generator_node, planner_node
 from tools.benchmark_storage import save_benchmark_artifact, save_benchmark_artifact_from_path
 from tools.eval_metrics import ARTIFACT_PASS_THRESHOLDS, score_compose, score_dockerfile, score_nginx, score_repo, summarize_scores
 from tools.github_tools import fetch_repo_structure_impl
@@ -112,6 +112,74 @@ def _run_planner_for_repo(repo: str, repo_url: str, github_token: Optional[str],
         "stack_tokens": planned.get("stack_tokens", []),
         "package_path": package_path,
         "key_files": scan.get("key_files", {}),
+    }
+
+
+def _run_generators_for_repo(repo: str, repo_url: str, github_token: Optional[str], max_files: int, package_path: str = ".") -> Dict[str, Any]:
+    scan = fetch_repo_structure_impl(
+        repo_url=repo_url,
+        github_token=github_token,
+        max_files=max_files,
+        package_path=package_path,
+    )
+
+    if "error" in scan:
+        return {
+            "repo": repo,
+            "repo_url": repo_url,
+            "error": scan.get("error"),
+            "services": [],
+            "stack_summary": "",
+            "stack_tokens": [],
+            "package_path": package_path,
+            "dockerfiles": {},
+            "docker_compose": "",
+            "nginx_conf": "",
+        }
+
+    state: Dict[str, Any] = {
+        "repo_url": repo_url,
+        "github_token": github_token,
+        "max_files": max_files,
+        "package_path": package_path,
+        "repo_scan": scan,
+    }
+
+    state = planner_node(state)
+    if state.get("error"):
+        return {
+            "repo": repo,
+            "repo_url": repo_url,
+            "error": state.get("error"),
+            "services": state.get("services", []),
+            "stack_summary": state.get("detected_stack", ""),
+            "stack_tokens": state.get("stack_tokens", []),
+            "package_path": package_path,
+            "dockerfiles": {},
+            "docker_compose": "",
+            "nginx_conf": "",
+        }
+
+    state = dockerfile_generator_node(state)
+    if not state.get("error"):
+        services = state.get("services")
+        should_generate_compose = isinstance(services, list) and len(services) > 1
+        if should_generate_compose:
+            state = compose_generator_node(state)
+    if not state.get("error"):
+        state = nginx_generator_node(state)
+
+    return {
+        "repo": repo,
+        "repo_url": repo_url,
+        "error": state.get("error"),
+        "services": state.get("services", []),
+        "stack_summary": state.get("detected_stack", ""),
+        "stack_tokens": state.get("stack_tokens", []),
+        "package_path": package_path,
+        "dockerfiles": state.get("dockerfiles", {}),
+        "docker_compose": state.get("docker_compose", "") or "",
+        "nginx_conf": state.get("nginx_conf", "") or "",
     }
 
 
@@ -392,6 +460,144 @@ def _build_artifact_summary(scored_reports: List[Dict[str, Any]]) -> Dict[str, A
     return per_artifact
 
 
+def _build_generated_artifact_scores(generated_result: Dict[str, Any], label: Dict[str, Any]) -> Dict[str, Any]:
+    dockerfiles = generated_result.get("dockerfiles", {}) or {}
+    required_stack_tokens = label.get("required_stack_tokens", [])
+
+    dockerfile_entries: Dict[str, Any] = {}
+    dockerfile_total_scores: List[float] = []
+    dockerfile_all_passed = True
+    aggregate_criteria: Dict[str, List[float]] = {
+        "base_image": [],
+        "non_root_user": [],
+        "expose_or_documented_port": [],
+        "healthcheck": [],
+        "stack_alignment": [],
+    }
+
+    for service_name, content in dockerfiles.items():
+        scored = score_dockerfile(str(content or ""), required_stack_tokens=required_stack_tokens)
+        dockerfile_entries[str(service_name)] = {
+            "total_score": scored.total_score,
+            "passed_threshold": scored.passed_threshold,
+            "criteria_scores": scored.criteria_scores,
+            "criterion_reasons": scored.criterion_reasons,
+        }
+        dockerfile_total_scores.append(float(scored.total_score))
+        dockerfile_all_passed = dockerfile_all_passed and bool(scored.passed_threshold)
+        for criterion, value in scored.criteria_scores.items():
+            if criterion in aggregate_criteria:
+                aggregate_criteria[criterion].append(float(value))
+
+    if dockerfile_total_scores:
+        dockerfile_total = sum(dockerfile_total_scores) / len(dockerfile_total_scores)
+        dockerfile_criteria_scores = {
+            key: (sum(values) / len(values) if values else 0.0)
+            for key, values in aggregate_criteria.items()
+        }
+        dockerfile_reasons = {
+            key: f"Average over {len(dockerfile_total_scores)} generated Dockerfile(s)"
+            for key in aggregate_criteria.keys()
+        }
+    else:
+        dockerfile_total = 0.0
+        dockerfile_criteria_scores = {key: 0.0 for key in aggregate_criteria.keys()}
+        dockerfile_reasons = {
+            key: "No generated Dockerfiles"
+            for key in aggregate_criteria.keys()
+        }
+        dockerfile_all_passed = False
+
+    compose_content = str(generated_result.get("docker_compose", "") or "")
+    compose_score = score_compose(
+        compose_content,
+        expected_services=label.get("expected_services", []),
+    )
+
+    nginx_content = str(generated_result.get("nginx_conf", "") or "")
+    nginx_score = score_nginx(
+        nginx_content,
+        expected_services=label.get("expected_services", []),
+    )
+
+    return {
+        "dockerfile": {
+            "file_path": "__generated_dockerfiles__" if dockerfile_total_scores else None,
+            "total_score": dockerfile_total,
+            "passed_threshold": dockerfile_all_passed,
+            "criteria_scores": dockerfile_criteria_scores,
+            "criterion_reasons": dockerfile_reasons,
+            "per_service": dockerfile_entries,
+        },
+        "compose": {
+            "file_path": "__generated_docker_compose__" if compose_content.strip() else None,
+            "total_score": compose_score.total_score,
+            "passed_threshold": compose_score.passed_threshold,
+            "criteria_scores": compose_score.criteria_scores,
+            "criterion_reasons": compose_score.criterion_reasons,
+        },
+        "nginx": {
+            "file_path": "__generated_nginx_conf__" if nginx_content.strip() else None,
+            "total_score": nginx_score.total_score,
+            "passed_threshold": nginx_score.passed_threshold,
+            "criteria_scores": nginx_score.criteria_scores,
+            "criterion_reasons": nginx_score.criterion_reasons,
+        },
+    }
+
+
+def _compose_generation_audit(label: Dict[str, Any], generated_artifact_scores: Dict[str, Any]) -> Dict[str, Any]:
+    expected_services = label.get("expected_services", []) if isinstance(label, dict) else []
+    expected_count = len(expected_services) if isinstance(expected_services, list) else 0
+    compose_required = expected_count > 1
+
+    compose_scores = generated_artifact_scores.get("compose", {}) if isinstance(generated_artifact_scores, dict) else {}
+    compose_generated = bool((compose_scores.get("file_path") or "").strip())
+
+    wrong_compose_gen = (compose_required and not compose_generated) or ((not compose_required) and compose_generated)
+
+    if compose_required and not compose_generated:
+        reason = "compose_missing_when_required"
+    elif (not compose_required) and compose_generated:
+        reason = "compose_generated_when_not_required"
+    else:
+        reason = "ok"
+
+    return {
+        "expected_service_count": expected_count,
+        "compose_required": compose_required,
+        "compose_generated": compose_generated,
+        "wrong_compose_gen": wrong_compose_gen,
+        "reason": reason,
+    }
+
+
+def _summarize_compose_generation_audits(audits: List[Dict[str, Any]]) -> Dict[str, Any]:
+    total = len(audits)
+    wrong = 0
+    missing_when_required = 0
+    generated_when_not_required = 0
+
+    for audit in audits:
+        if not isinstance(audit, dict):
+            continue
+        if bool(audit.get("wrong_compose_gen")):
+            wrong += 1
+        reason = audit.get("reason")
+        if reason == "compose_missing_when_required":
+            missing_when_required += 1
+        elif reason == "compose_generated_when_not_required":
+            generated_when_not_required += 1
+
+    return {
+        "compose_generation_eval_repo_count": total,
+        "wrong_compose_gen_count": wrong,
+        "wrong_compose_gen_rate": (wrong / total) if total else 0.0,
+        "compose_missing_when_required_count": missing_when_required,
+        "compose_generated_when_not_required_count": generated_when_not_required,
+    }
+
+
 def _failure_bucket_from_report(report: Dict[str, Any]) -> str:
     error_text = (report.get("error") or "").lower()
     metrics = report.get("metrics", {}) or {}
@@ -440,6 +646,11 @@ def run() -> int:
     parser.add_argument("--max-files", type=int, default=50)
     parser.add_argument("--repos", nargs="*", default=[])
     parser.add_argument("--output", default="")
+    parser.add_argument(
+        "--include-generated",
+        action="store_true",
+        help="Run generator nodes and evaluate generated artifacts in addition to existing repo files.",
+    )
     args = parser.parse_args()
 
     labels = _load_labels(args.labels_file)
@@ -466,6 +677,9 @@ def run() -> int:
     score_inputs = []
     unlabeled_targets = []
     run_errors = []
+    generated_reports: List[Dict[str, Any]] = []
+    generated_run_errors = []
+    compose_generation_audits: List[Dict[str, Any]] = []
 
     start_time = time.perf_counter()
 
@@ -491,7 +705,26 @@ def run() -> int:
             expected_ports=label.get("expected_ports", {}),
         )
         score_inputs.append(score_obj)
-        scored_reports.append(_build_repo_report(result, label))
+        repo_report = _build_repo_report(result, label)
+
+        if args.include_generated:
+            generated_result = _run_generators_for_repo(
+                repo,
+                repo_url,
+                args.github_token,
+                args.max_files,
+                package_path=package_path,
+            )
+            if generated_result.get("error"):
+                generated_run_errors.append({"repo": repo, "package_path": package_path, "error": generated_result["error"]})
+            generated_scores = _build_generated_artifact_scores(generated_result, label)
+            repo_report["generated_artifact_scores"] = generated_scores
+            compose_generation_audit = _compose_generation_audit(label, generated_scores)
+            repo_report["compose_generation_audit"] = compose_generation_audit
+            compose_generation_audits.append(compose_generation_audit)
+            generated_reports.append({"artifact_scores": generated_scores})
+
+        scored_reports.append(repo_report)
 
     elapsed_seconds = time.perf_counter() - start_time
     run_id = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
@@ -502,6 +735,13 @@ def run() -> int:
     summary["targets_with_labels"] = len(score_inputs)
     summary["targets_without_labels"] = len(unlabeled_targets)
     summary["targets_with_runtime_errors"] = len(run_errors)
+    summary["compose_generation_eval_repo_count"] = 0
+    summary["wrong_compose_gen_count"] = 0
+    summary["wrong_compose_gen_rate"] = 0.0
+    summary["compose_missing_when_required_count"] = 0
+    summary["compose_generated_when_not_required_count"] = 0
+    if args.include_generated:
+        summary["targets_with_generated_runtime_errors"] = len(generated_run_errors)
     failure_buckets: Dict[str, int] = {}
     for report in scored_reports:
         bucket = report.get("failure_bucket", "unknown")
@@ -509,6 +749,9 @@ def run() -> int:
     summary["failure_buckets"] = failure_buckets
 
     summary["artifact_summary"] = _build_artifact_summary(scored_reports)
+    if args.include_generated:
+        summary["generated_artifact_summary"] = _build_artifact_summary(generated_reports)
+        summary.update(_summarize_compose_generation_audits(compose_generation_audits))
 
     report = {
         "run_id": run_id,
@@ -520,6 +763,8 @@ def run() -> int:
         "targets_without_labels": unlabeled_targets,
         "runtime_errors": run_errors,
     }
+    if args.include_generated:
+        report["generated_runtime_errors"] = generated_run_errors
 
     output_path = args.output or _default_output_path()
     output_file_name = os.path.basename(output_path)

@@ -34,6 +34,14 @@ def check_planner_error(state: Dict[str, Any]) -> str:
     return "error" if state.get("error") else "continue"
 
 
+def check_compose_required(state: Dict[str, Any]) -> str:
+    """Generate compose only when there are multiple app services."""
+    services = state.get("services")
+    if isinstance(services, list) and len(services) > 1:
+        return "compose"
+    return "skip"
+
+
 # Entry point
 workflow.set_entry_point("scanner")
 
@@ -57,8 +65,15 @@ workflow.add_conditional_edges(
     },
 )
 
-# Linear flow: docker_gen -> compose_gen -> nginx_gen -> verifier -> END
-workflow.add_edge("docker_gen", "compose_gen")
+# Flow: docker_gen -> compose_gen (if needed) -> nginx_gen -> verifier -> END
+workflow.add_conditional_edges(
+    "docker_gen",
+    check_compose_required,
+    {
+        "compose": "compose_gen",
+        "skip": "nginx_gen",
+    },
+)
 workflow.add_edge("compose_gen", "nginx_gen")
 workflow.add_edge("nginx_gen", "verifier")
 workflow.add_edge("verifier", END)
