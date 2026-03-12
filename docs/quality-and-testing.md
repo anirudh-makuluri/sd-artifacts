@@ -61,7 +61,8 @@ Planner and repo-artifact evaluation:
 ```bash
 python tools/evaluate_scan_quality.py \
   --labels-file benchmarks/example_bank_labels.json \
-  --max-files 50
+  --max-files 50 \
+  --max-workers 2
 ```
 
 Include generated artifact evaluation:
@@ -70,8 +71,15 @@ Include generated artifact evaluation:
 python tools/evaluate_scan_quality.py \
   --labels-file benchmarks/example_bank_labels.json \
   --max-files 50 \
+  --max-workers 2 \
   --include-generated
 ```
+
+Concurrency control:
+- `--max-workers` controls how many labeled repos are evaluated concurrently.
+- Default is `1` (sequential behavior).
+- Use `2` to `4` for typical I/O-bound benchmark runs.
+- Results are still reported in input target order.
 
 Behavior:
 - Only label-file entries are evaluated.

@@ -1,10 +1,14 @@
 import json
+import time
+
+import tools.evaluate_scan_quality as evaluate_scan_quality
 
 from tools.evaluate_scan_quality import (
     _build_artifact_summary,
     _build_generated_artifact_scores,
     _build_repo_report,
     _compose_generation_audit,
+    _evaluate_targets,
     _failure_bucket_from_report,
     _load_labels,
     _select_compose_file,
@@ -407,3 +411,57 @@ def test_summarize_compose_generation_audits_counts_both_error_types():
     assert summary["wrong_compose_gen_rate"] == 2 / 3
     assert summary["compose_missing_when_required_count"] == 1
     assert summary["compose_generated_when_not_required_count"] == 1
+
+
+def test_evaluate_targets_parallel_preserves_target_order(monkeypatch):
+    targets = [
+        {
+            "repo": "slow/repo",
+            "repo_url": "https://github.com/slow/repo",
+            "package_path": ".",
+            "label": {},
+        },
+        {
+            "repo": "fast/repo",
+            "repo_url": "https://github.com/fast/repo",
+            "package_path": ".",
+            "label": {},
+        },
+    ]
+
+    def fake_run_planner_for_repo(repo, repo_url, github_token, max_files, package_path="."):
+        if repo == "slow/repo":
+            time.sleep(0.03)
+        return {
+            "repo": repo,
+            "repo_url": repo_url,
+            "error": None,
+            "services": [],
+            "stack_summary": "",
+            "stack_tokens": [],
+            "package_path": package_path,
+            "key_files": {},
+        }
+
+    monkeypatch.setattr(evaluate_scan_quality, "_run_planner_for_repo", fake_run_planner_for_repo)
+    monkeypatch.setattr(evaluate_scan_quality, "score_repo", lambda **kwargs: {"repo": kwargs["repo"]})
+    monkeypatch.setattr(
+        evaluate_scan_quality,
+        "_build_repo_report",
+        lambda result, label: {
+            "repo": result["repo"],
+            "error": result.get("error"),
+            "artifact_scores": {},
+        },
+    )
+
+    evaluations = _evaluate_targets(
+        targets,
+        github_token=None,
+        max_files=10,
+        include_generated=False,
+        max_workers=2,
+    )
+
+    assert [entry["repo_report"]["repo"] for entry in evaluations] == ["slow/repo", "fast/repo"]
+    assert [entry["score_obj"]["repo"] for entry in evaluations] == ["slow/repo", "fast/repo"]

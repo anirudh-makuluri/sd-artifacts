@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import argparse
+from concurrent.futures import ThreadPoolExecutor
+from functools import partial
 import json
 import os
 import sys
@@ -661,11 +663,114 @@ def _default_output_path() -> str:
     return os.path.join("benchmarks", f"scan-quality-{now}.json")
 
 
+def _evaluate_target(
+    target: Dict[str, Any],
+    github_token: Optional[str],
+    max_files: int,
+    include_generated: bool,
+) -> Dict[str, Any]:
+    repo = target["repo"]
+    repo_url = target["repo_url"]
+    package_path = target.get("package_path", ".")
+    label = target.get("label") or {}
+
+    result = _run_planner_for_repo(
+        repo,
+        repo_url,
+        github_token,
+        max_files,
+        package_path=package_path,
+    )
+
+    run_error = None
+    if result.get("error"):
+        run_error = {
+            "repo": repo,
+            "package_path": package_path,
+            "error": result["error"],
+        }
+
+    score_obj = score_repo(
+        repo=repo,
+        predicted_services=result.get("services", []),
+        expected_services=label.get("expected_services", []),
+        excluded_services=label.get("excluded_services", []),
+        required_stack_tokens=label.get("required_stack_tokens", []),
+        predicted_stack=result.get("stack_summary", ""),
+        predicted_stack_tokens=result.get("stack_tokens", []),
+        expected_ports=label.get("expected_ports", {}),
+    )
+    repo_report = _build_repo_report(result, label)
+
+    generated_run_error = None
+    generated_report = None
+    compose_generation_audit = None
+
+    if include_generated:
+        generated_result = _run_generators_for_repo(
+            repo,
+            repo_url,
+            github_token,
+            max_files,
+            package_path=package_path,
+        )
+        if generated_result.get("error"):
+            generated_run_error = {
+                "repo": repo,
+                "package_path": package_path,
+                "error": generated_result["error"],
+            }
+        generated_scores = _build_generated_artifact_scores(generated_result, label)
+        repo_report["generated_artifact_scores"] = generated_scores
+        compose_generation_audit = _compose_generation_audit(label, generated_scores)
+        repo_report["compose_generation_audit"] = compose_generation_audit
+        generated_report = {"artifact_scores": generated_scores}
+
+    return {
+        "score_obj": score_obj,
+        "repo_report": repo_report,
+        "run_error": run_error,
+        "generated_run_error": generated_run_error,
+        "generated_report": generated_report,
+        "compose_generation_audit": compose_generation_audit,
+    }
+
+
+def _evaluate_targets(
+    targets: List[Dict[str, Any]],
+    github_token: Optional[str],
+    max_files: int,
+    include_generated: bool,
+    max_workers: int,
+) -> List[Dict[str, Any]]:
+    if max_workers <= 1 or len(targets) <= 1:
+        return [
+            _evaluate_target(target, github_token, max_files, include_generated)
+            for target in targets
+        ]
+
+    worker_count = min(max_workers, len(targets))
+    evaluate_one = partial(
+        _evaluate_target,
+        github_token=github_token,
+        max_files=max_files,
+        include_generated=include_generated,
+    )
+    with ThreadPoolExecutor(max_workers=worker_count) as executor:
+        return list(executor.map(evaluate_one, targets))
+
+
 def run() -> int:
     parser = argparse.ArgumentParser(description="Evaluate scanner+planner accuracy against labeled repos")
     parser.add_argument("--labels-file", default=os.path.join("benchmarks", "example_bank_labels.json"))
     parser.add_argument("--github-token", default=os.getenv("GITHUB_TOKEN"))
     parser.add_argument("--max-files", type=int, default=50)
+    parser.add_argument(
+        "--max-workers",
+        type=int,
+        default=1,
+        help="Number of repos to evaluate concurrently. Use 1 for sequential behavior.",
+    )
     parser.add_argument("--repos", nargs="*", default=[])
     parser.add_argument("--output", default="")
     parser.add_argument(
@@ -674,6 +779,9 @@ def run() -> int:
         help="Run generator nodes and evaluate generated artifacts in addition to existing repo files.",
     )
     args = parser.parse_args()
+
+    if args.max_workers < 1:
+        parser.error("--max-workers must be >= 1")
 
     labels = _load_labels(args.labels_file)
 
@@ -705,48 +813,35 @@ def run() -> int:
 
     start_time = time.perf_counter()
 
-    for target in targets:
-        repo = target["repo"]
-        repo_url = target["repo_url"]
-        package_path = target.get("package_path", ".")
-        print(f"Evaluating {repo} (package_path={package_path})...")
-        result = _run_planner_for_repo(repo, repo_url, args.github_token, args.max_files, package_path=package_path)
-        label = target.get("label")
+    if args.max_workers > 1 and len(targets) > 1:
+        worker_count = min(args.max_workers, len(targets))
+        print(f"Evaluating {len(targets)} repos concurrently (max_workers={worker_count})...")
+    else:
+        for target in targets:
+            repo = target["repo"]
+            package_path = target.get("package_path", ".")
+            print(f"Evaluating {repo} (package_path={package_path})...")
 
-        if result.get("error"):
-            run_errors.append({"repo": repo, "package_path": package_path, "error": result["error"]})
+    evaluations = _evaluate_targets(
+        targets,
+        github_token=args.github_token,
+        max_files=args.max_files,
+        include_generated=args.include_generated,
+        max_workers=args.max_workers,
+    )
 
-        score_obj = score_repo(
-            repo=repo,
-            predicted_services=result.get("services", []),
-            expected_services=label.get("expected_services", []),
-            excluded_services=label.get("excluded_services", []),
-            required_stack_tokens=label.get("required_stack_tokens", []),
-            predicted_stack=result.get("stack_summary", ""),
-            predicted_stack_tokens=result.get("stack_tokens", []),
-            expected_ports=label.get("expected_ports", {}),
-        )
-        score_inputs.append(score_obj)
-        repo_report = _build_repo_report(result, label)
-
+    for evaluation in evaluations:
+        score_inputs.append(evaluation["score_obj"])
+        scored_reports.append(evaluation["repo_report"])
+        if evaluation["run_error"]:
+            run_errors.append(evaluation["run_error"])
         if args.include_generated:
-            generated_result = _run_generators_for_repo(
-                repo,
-                repo_url,
-                args.github_token,
-                args.max_files,
-                package_path=package_path,
-            )
-            if generated_result.get("error"):
-                generated_run_errors.append({"repo": repo, "package_path": package_path, "error": generated_result["error"]})
-            generated_scores = _build_generated_artifact_scores(generated_result, label)
-            repo_report["generated_artifact_scores"] = generated_scores
-            compose_generation_audit = _compose_generation_audit(label, generated_scores)
-            repo_report["compose_generation_audit"] = compose_generation_audit
-            compose_generation_audits.append(compose_generation_audit)
-            generated_reports.append({"artifact_scores": generated_scores})
-
-        scored_reports.append(repo_report)
+            if evaluation["generated_run_error"]:
+                generated_run_errors.append(evaluation["generated_run_error"])
+            if evaluation["generated_report"]:
+                generated_reports.append(evaluation["generated_report"])
+            if evaluation["compose_generation_audit"]:
+                compose_generation_audits.append(evaluation["compose_generation_audit"])
 
     elapsed_seconds = time.perf_counter() - start_time
     run_id = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")

@@ -98,7 +98,8 @@ Run the standard benchmark:
 
 ```bash
 python tools/evaluate_scan_quality.py \
-    --labels-file benchmarks/example_bank_labels.json
+    --labels-file benchmarks/example_bank_labels.json \
+    --max-workers 2
 ```
 
 Run the generated-artifact benchmark:
@@ -106,8 +107,14 @@ Run the generated-artifact benchmark:
 ```bash
 python tools/evaluate_scan_quality.py \
     --labels-file benchmarks/example_bank_labels.json \
+    --max-workers 2 \
     --include-generated
 ```
+
+Concurrency notes:
+- `--max-workers` controls concurrent repo evaluations.
+- Default is `1`, which keeps sequential behavior.
+- For network-heavy benchmark runs, `2` to `4` workers usually reduces wall-clock time.
 
 Latest scan quality snapshot (benchmarks/latest-scan-quality.json):
 - Run ID: 20260312-214917
