@@ -39,7 +39,7 @@ Rules:
 - Listen on port 80.
 - Route traffic to each service appropriately (e.g., frontend on /, WebSocket on /ws, API on /api).
 - Use `localhost` as upstream hostnames (e.g., `proxy_pass http://localhost:3000`).
-- Include security headers (X-Frame-Options, X-Content-Type-Options, HSTS, etc.).
+- Include ALL of these security headers: X-Frame-Options, X-Content-Type-Options, Content-Security-Policy.
 - Include proper proxy headers (X-Real-IP, X-Forwarded-For).
 - For WebSocket services, include proper upgrade headers.
 - Output ONLY nginx config, no markdown wrappers.
@@ -55,7 +55,7 @@ Rules:
 - Listen on port 80.
 - Route traffic to each service appropriately (e.g., frontend on /, WebSocket on /ws, API on /api).
 - Use `localhost` as upstream hostnames (e.g., `proxy_pass http://localhost:3000`).
-- Include security headers (X-Frame-Options, X-Content-Type-Options, HSTS, etc.).
+- Include ALL of these security headers: X-Frame-Options, X-Content-Type-Options, Content-Security-Policy.
 - Include proper proxy headers (X-Real-IP, X-Forwarded-For).
 - For WebSocket services, include proper upgrade headers (Connection, Upgrade).
 - Output ONLY nginx config, no markdown wrappers.

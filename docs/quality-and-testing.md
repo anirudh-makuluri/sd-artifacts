@@ -127,25 +127,27 @@ Generated-mode compose audit logic:
 - Generated Nginx `avg_total_score >= 0.85`
 - `wrong_compose_gen_rate == 0.0`
 
-### 5) Latest committed planner snapshot
+### 5) Latest benchmark snapshot (V2)
 
-From `benchmarks/latest-scan-quality.json`:
-- Targets evaluated: 18
-- `service_precision`: 0.9583
-- `service_recall`: 0.9583
-- `service_f1`: 0.9583
+From `benchmarks/latest-scan-quality.json` (run `20260313-000022`, 5 labeled targets):
+
+**Planner metrics:**
+- `service_precision`: 1.0
+- `service_recall`: 1.0
+- `service_f1`: 1.0
 - `mobile_leakage_rate`: 0.0
 - `stack_accuracy`: 1.0
-- `port_accuracy_known`: 0.9167 (22/24)
-- `port_unknown_rate`: 0.0417
-- Failure buckets: 17 `ok`, 1 `service_precision_miss`
+- `port_accuracy_known`: 1.0 (7/7)
+- `wrong_compose_gen_rate`: 0.0
+- Failure buckets: ok = 5
 
-Note:
-- The committed snapshot above predates generated-artifact benchmarking.
-- To inspect `artifact_summary`, `generated_artifact_summary`, and compose-generation audit metrics, run the benchmark locally with the current script.
+**Generated artifact metrics (`--include-generated`):**
+- Dockerfile: avg = 1.0, pass_rate = 1.0 (threshold 0.90)
+- Compose: avg = 0.95, pass_rate = 1.0 (threshold 0.90)
+- Nginx: avg = 0.980, pass_rate = 1.0 (threshold 0.85)
+- Combined: avg = 0.986, all_present_pass_rate = 1.0
 
-Current remaining precision miss:
-- `anirudh-makuluri/Accio` at `package_path=.` predicts one extra service (`neo4j` at `.`) in addition to expected backend and frontend services.
+**V2 scope note:** V2 covers artifact benchmarking and generation-quality improvement for Dockerfile, docker-compose, and nginx. Infrastructure service classification and infra-specific generation are deferred to V3.
 
 ## Stack Tokens
 

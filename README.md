@@ -117,7 +117,7 @@ Concurrency notes:
 - For network-heavy benchmark runs, `2` to `4` workers usually reduces wall-clock time.
 
 Latest scan quality snapshot (benchmarks/latest-scan-quality.json):
-- Run ID: 20260312-214917
+- Run ID: 20260313-000022
 - Targets evaluated: 5
 - Service precision/recall/F1: 1.0 / 1.0 / 1.0
 - Mobile leakage rate: 0.0
@@ -126,10 +126,10 @@ Latest scan quality snapshot (benchmarks/latest-scan-quality.json):
 - Compose generation audit: wrong_compose_gen_rate = 0.0 (0/5)
 - Failure buckets: ok = 5
 - Generated artifact summary:
-    - Dockerfile avg/pass-rate: 0.8875 / 0.4
+    - Dockerfile avg/pass-rate: 1.0 / 1.0
     - Compose avg/pass-rate: 0.95 / 1.0
-    - Nginx avg/pass-rate: 0.843333 / 0.6
-    - Combined avg/all-present-pass-rate: 0.8794443 / 0.2
+    - Nginx avg/pass-rate: 0.980 / 1.0
+    - Combined avg/all-present-pass-rate: 0.9856 / 1.0
 
 See [docs/quality-and-testing.md](docs/quality-and-testing.md) for the metric definitions, thresholds, and output schema.
 

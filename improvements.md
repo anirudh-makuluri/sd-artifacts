@@ -45,6 +45,22 @@
   - `tests/test_graph_flow.py`
 - Updated benchmark docs to describe the new scoring and generated-evaluation modes.
 
+### [x] 6. V2 Generated Artifact Quality Tuning (benchmark-driven)
+- Fixed planner duplicate-service deduplication: `_dedupe_services_by_context` collapses services sharing the same build context + port, eliminating spurious compose generation for single-service repos.
+- Fixed per-service port refinement: `_apply_per_service_port_refinement` calls the deterministic extractor per service context, replacing root-level port with per-context port for multi-service monorepos.
+- Fixed Dockerfile stack-alignment scoring: `RUNTIME_STACK_TOKENS` filter applied to `required_stack_tokens` for all repos (framework tokens like `react` are excluded — Dockerfiles only contain runtime information).
+- Fixed nginx route_coverage: port-based fallback matching added when service name is absent from nginx content (e.g., LLM uses `localhost:3000` instead of service name).
+- Fixed nginx security headers: both prompt variants now explicitly list `Content-Security-Policy` alongside `X-Frame-Options` and `X-Content-Type-Options`.
+- For generated artifact evaluation, pass predicted services (with port info) to `score_nginx` so name-based checks use the same names the generator was given.
+- Final benchmark outcome (run `20260313-000022`, 5 targets):
+  - Service F1: 1.0, port_accuracy: 1.0, wrong_compose_gen_rate: 0.0
+  - Generated Dockerfile avg/pass: 1.0 / 1.0
+  - Generated Compose avg/pass: 0.95 / 1.0
+  - Generated Nginx avg/pass: 0.980 / 1.0
+  - Combined all-present pass rate: 1.0
+
+**V3 scope (deferred):** Infrastructure service classification (databases, caches, queues), infra-specific Dockerfile and compose generation, and multi-tier network topology modeling.
+
 ## Pending (Sorted by Priority)
 
 ### [P0] 1. Feedback Loop for Failed or Low-Quality Output

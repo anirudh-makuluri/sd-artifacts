@@ -347,6 +347,29 @@ def test_build_generated_artifact_scores_uses_runtime_tokens_for_multi_service()
     assert scores["dockerfile"]["per_service"]["web"]["criteria_scores"]["stack_alignment"] == 1.0
 
 
+def test_build_generated_artifact_scores_filters_framework_tokens_for_single_service():
+    # Even for a single-service repo, non-runtime tokens like 'react' should not be required
+    # in the Dockerfile — the Dockerfile only uses the node runtime.
+    generated = {
+        "services": [{"name": "web", "build_context": "apps/web", "port": 3000}],
+        "dockerfiles": {
+            "web": "FROM node:20-alpine\nUSER node\nEXPOSE 3000\nHEALTHCHECK CMD wget -qO- http://localhost:3000 || exit 1",
+        },
+        "docker_compose": "",
+        "nginx_conf": "",
+    }
+    label = {
+        "required_stack_tokens": ["react"],
+        "expected_services": [{"name": "web", "build_context": "apps/web"}],
+    }
+
+    scores = _build_generated_artifact_scores(generated, label)
+
+    assert scores["dockerfile"]["per_service"]["web"]["criteria_scores"]["stack_alignment"] == 1.0, (
+        "react is a framework token and should not be required in the Dockerfile"
+    )
+
+
 def test_compose_generation_audit_detects_missing_when_required():
     label = {
         "expected_services": [

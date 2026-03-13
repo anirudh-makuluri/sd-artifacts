@@ -481,12 +481,9 @@ def _build_generated_artifact_scores(generated_result: Dict[str, Any], label: Di
     generated_services = generated_result.get("services", [])
     service_count = len(generated_services) if isinstance(generated_services, list) and generated_services else len(dockerfiles)
 
-    # For multi-service repos, score Dockerfiles against runtime tokens only.
-    # Framework/UI tokens are often repo-level and not expected to appear in every service Dockerfile.
-    if service_count > 1:
-        effective_required_stack_tokens = [token for token in required_stack_tokens if token in RUNTIME_STACK_TOKENS]
-    else:
-        effective_required_stack_tokens = required_stack_tokens
+    # Dockerfiles contain runtime information only — framework/UI tokens (e.g. react, tailwindcss)
+    # do not appear in Dockerfiles regardless of service count. Always filter to runtime tokens.
+    effective_required_stack_tokens = [token for token in required_stack_tokens if token in RUNTIME_STACK_TOKENS]
 
     dockerfile_entries: Dict[str, Any] = {}
     dockerfile_total_scores: List[float] = []
@@ -539,9 +536,16 @@ def _build_generated_artifact_scores(generated_result: Dict[str, Any], label: Di
     )
 
     nginx_content = str(generated_result.get("nginx_conf", "") or "")
+    # Use predicted services (with ports) as the routing expectation for generated nginx —
+    # the generator only knows about these names/ports, not the label's expected_service names.
+    nginx_expected_services = (
+        generated_services
+        if isinstance(generated_services, list) and generated_services
+        else label.get("expected_services", [])
+    )
     nginx_score = score_nginx(
         nginx_content,
-        expected_services=label.get("expected_services", []),
+        expected_services=nginx_expected_services,
     )
 
     return {

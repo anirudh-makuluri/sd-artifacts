@@ -631,10 +631,26 @@ def score_nginx(
     proxy_targets = _extract_proxy_pass_targets(lines)
     lower_proxy_targets = [target.lower() for target in proxy_targets]
 
+    expected_ports: Dict[str, Optional[int]] = {}
+    for service in expected_services or []:
+        if not isinstance(service, dict):
+            continue
+        name = normalize_name(str(service.get("name", "")))
+        port = service.get("port")
+        try:
+            port_int: Optional[int] = int(port) if port else None
+        except (ValueError, TypeError):
+            port_int = None
+        if name:
+            expected_ports[name] = port_int
+
     if expected_names:
         covered = 0
         for name in expected_names:
-            if any(name in target for target in lower_proxy_targets) or name in lower_content:
+            name_found = any(name in target for target in lower_proxy_targets) or name in lower_content
+            port = expected_ports.get(name)
+            port_found = port is not None and any(f":{port}" in target for target in lower_proxy_targets)
+            if name_found or port_found:
                 covered += 1
         coverage = covered / len(expected_names)
         criteria_scores["route_coverage"] = round(coverage, 6)

@@ -2,6 +2,7 @@ from tools.eval_metrics import (
     ARTIFACT_PASS_THRESHOLDS,
     ARTIFACT_SCORE_WEIGHTS,
     artifact_scoring_contract,
+    score_nginx,
     score_repo,
     summarize_scores,
 )
@@ -96,4 +97,55 @@ def test_artifact_weights_are_normalized_per_artifact():
     for artifact, criteria in ARTIFACT_SCORE_WEIGHTS.items():
         assert criteria
         assert round(sum(criteria.values()), 6) == 1.0, artifact
+
+
+def test_score_nginx_route_coverage_uses_port_fallback_when_name_absent():
+    # Service name does not appear in nginx but the port does — should still count as covered.
+    nginx_conf = """
+events {}
+http {
+    server {
+        listen 80;
+        add_header X-Frame-Options DENY;
+        add_header X-Content-Type-Options nosniff;
+        add_header Content-Security-Policy "default-src 'self'";
+        location / {
+            proxy_pass http://localhost:3000;
+        }
+    }
+}
+"""
+    expected_services = [{"name": "web", "port": 3000}]
+    result = score_nginx(nginx_conf, expected_services=expected_services)
+    assert result.criteria_scores["route_coverage"] == 1.0, "Port-based fallback should match :3000"
+
+
+def test_score_nginx_route_coverage_multi_service_port_fallback():
+    # Two services — one found by name in upstream block, one found by port only.
+    nginx_conf = """
+events {}
+http {
+    upstream backend {
+        server localhost:5000;
+    }
+    server {
+        listen 80;
+        add_header X-Frame-Options DENY;
+        add_header X-Content-Type-Options nosniff;
+        add_header Content-Security-Policy "default-src 'self'";
+        location /api/ {
+            proxy_pass http://backend;
+        }
+        location / {
+            proxy_pass http://localhost:3000;
+        }
+    }
+}
+"""
+    expected_services = [
+        {"name": "backend", "port": 5000},
+        {"name": "web", "port": 3000},
+    ]
+    result = score_nginx(nginx_conf, expected_services=expected_services)
+    assert result.criteria_scores["route_coverage"] == 1.0, "backend by name and web by port :3000"
 
