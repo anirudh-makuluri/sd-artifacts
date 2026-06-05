@@ -84,7 +84,8 @@ class FakeTableQuery:
                         "response_id": self.insert_payload.get("response_id"),
                         "commit_sha": self.insert_payload.get("commit_sha"),
                         "package_path": self.insert_payload.get("package_path"),
-                        "service_name": self.insert_payload.get("service_name"),
+                        "schema_version": self.insert_payload.get("schema_version"),
+                        "build_status": self.insert_payload.get("build_status"),
                         "result": self.insert_payload.get("result"),
                     }
                 )
@@ -105,9 +106,15 @@ class FakeTableQuery:
                         row.get("repo_url") == self.upsert_payload.get("repo_url")
                         and row.get("commit_sha") == self.upsert_payload.get("commit_sha")
                         and row.get("package_path") == self.upsert_payload.get("package_path")
-                        and row.get("service_name") == self.upsert_payload.get("service_name")
                     ):
-                        row["result"] = self.upsert_payload.get("result")
+                        row.update(
+                            {
+                                "result": self.upsert_payload.get("result"),
+                                "schema_version": self.upsert_payload.get("schema_version"),
+                                "build_status": self.upsert_payload.get("build_status"),
+                                "response_id": self.upsert_payload.get("response_id"),
+                            }
+                        )
                         matched = True
                         break
                 if not matched:
@@ -118,7 +125,8 @@ class FakeTableQuery:
                             "response_id": self.upsert_payload.get("response_id"),
                             "commit_sha": self.upsert_payload.get("commit_sha"),
                             "package_path": self.upsert_payload.get("package_path"),
-                            "service_name": self.upsert_payload.get("service_name"),
+                            "schema_version": self.upsert_payload.get("schema_version"),
+                            "build_status": self.upsert_payload.get("build_status"),
                             "result": self.upsert_payload.get("result"),
                         }
                     )
@@ -186,6 +194,34 @@ def _auth_headers():
     return {"Authorization": "Bearer test-token"}
 
 
+def _v2_graph_state(**overrides):
+    base = {
+        "schema_version": 2,
+        "commit_sha": "sha-1",
+        "package_path": ".",
+        "deploy_shape": "server",
+        "build_status": "passed",
+        "deploy_units": [
+            {
+                "name": "api",
+                "root": ".",
+                "type": "server",
+                "framework": "fastapi",
+                "port": 8000,
+            }
+        ],
+        "deploy_briefing": "FastAPI service",
+        "build_verification": {"backend": "railpack", "status": "passed"},
+        "repair_history": [],
+        "pipeline_trace": [],
+        "errors": [],
+        "llm_outputs": {},
+        "inputs_snapshot": {},
+    }
+    base.update(overrides)
+    return base
+
+
 def _client():
     return TestClient(app_module.app)
 
@@ -219,7 +255,7 @@ def test_analyze_returns_400_on_graph_error(monkeypatch):
     assert response.json()["detail"] == "scan failed"
 
 
-def test_analyze_returns_400_on_preflight_error(monkeypatch):
+def test_analyze_returns_400_on_structured_graph_error(monkeypatch):
     _set_auth(monkeypatch)
     _set_common_mocks(monkeypatch)
     monkeypatch.setattr(
@@ -227,9 +263,8 @@ def test_analyze_returns_400_on_preflight_error(monkeypatch):
         "invoke",
         lambda *_args, **_kwargs: {
             "error": {
-                "code": "preflight_failed",
-                "message": "Static preflight checks failed for generated Dockerfiles.",
-                "issues": ["web: COPY source '../package.json' escapes build context 'apps/web'"],
+                "code": "build_failed",
+                "message": "Railpack build failed for deploy unit api.",
             }
         },
     )
@@ -238,7 +273,7 @@ def test_analyze_returns_400_on_preflight_error(monkeypatch):
 
     assert response.status_code == 400
     detail = response.json()["detail"]
-    assert detail["code"] == "preflight_failed"
+    assert detail["code"] == "build_failed"
 
 
 def test_health_endpoint_reports_basic_configuration(monkeypatch):
@@ -274,18 +309,13 @@ def test_authenticated_health_endpoint_requires_valid_token(monkeypatch):
 def test_analyze_returns_cached_payload_with_commit_sha_backfill(monkeypatch):
     _set_auth(monkeypatch)
     _set_common_mocks(monkeypatch)
+    cached = _v2_graph_state(commit_sha="abc123", deploy_briefing="Python API")
     monkeypatch.setattr(
         app_module.graph,
         "invoke",
         lambda *_args, **_kwargs: {
             "commit_sha": "abc123",
-            "cached_response": {
-                "stack_summary": "Python",
-                "services": [],
-                "dockerfiles": {},
-                "risks": [],
-                "confidence": 0.9,
-            },
+            "cached_response": cached,
         },
     )
 
@@ -294,7 +324,8 @@ def test_analyze_returns_cached_payload_with_commit_sha_backfill(monkeypatch):
     assert response.status_code == 200
     payload = response.json()
     assert payload["commit_sha"] == "abc123"
-    assert payload["stack_summary"] == "Python"
+    assert payload["schema_version"] == 2
+    assert payload["deploy_briefing"] == "Python API"
 
 
 def test_analyze_success_without_supabase(monkeypatch):
@@ -303,14 +334,11 @@ def test_analyze_success_without_supabase(monkeypatch):
     monkeypatch.setattr(
         app_module.graph,
         "invoke",
-        lambda *_args, **_kwargs: {
-            "commit_sha": "sha-1",
-            "detected_stack": "FastAPI",
-            "services": [{"name": "api", "build_context": ".", "port": 8000}],
-            "dockerfiles": {"Dockerfile": "FROM python:3.11"},
-            "risks": ["none"],
-            "confidence": 0.8,
-        },
+        lambda *_args, **_kwargs: _v2_graph_state(
+            commit_sha="sha-1",
+            package_path="services/api",
+            deploy_briefing="FastAPI",
+        ),
     )
     monkeypatch.setattr(db_module, "supabase", None)
 
@@ -324,6 +352,9 @@ def test_analyze_success_without_supabase(monkeypatch):
     payload = response.json()
     assert payload["response_id"]
     assert payload["commit_sha"] == "sha-1"
+    assert payload["schema_version"] == 2
+    assert payload["build_status"] == "passed"
+    assert payload["deploy_units"][0]["name"] == "api"
     assert payload["token_usage"]["total_tokens"] == 18
 
 
@@ -335,14 +366,11 @@ def test_analyze_success_caches_result(monkeypatch):
     monkeypatch.setattr(
         app_module.graph,
         "invoke",
-        lambda *_args, **_kwargs: {
-            "commit_sha": "sha-cache",
-            "detected_stack": "Node",
-            "services": [],
-            "dockerfiles": {},
-            "risks": [],
-            "confidence": 0.7,
-        },
+        lambda *_args, **_kwargs: _v2_graph_state(
+            commit_sha="sha-cache",
+            package_path="apps/web",
+            deploy_briefing="Node app",
+        ),
     )
 
     response = _client().post(
@@ -357,7 +385,10 @@ def test_analyze_success_caches_result(monkeypatch):
     assert inserted["repo_url"] == "https://github.com/acme/repo"
     assert inserted["commit_sha"] == "sha-cache"
     assert inserted["response_id"]
-    assert inserted["result"]["_cache_package_path"] == "apps/web"
+    assert inserted["schema_version"] == 2
+    assert inserted["package_path"] == "apps/web"
+    assert inserted["result"]["schema_version"] == 2
+    assert inserted["result"]["package_path"] == "apps/web"
     assert len(fake_supabase.response_log_payloads) == 1
     assert fake_supabase.response_log_payloads[0]["endpoint"] == "/analyze"
 
@@ -367,7 +398,11 @@ def test_analyze_cache_insert_retries_until_success(monkeypatch):
     _set_common_mocks(monkeypatch)
     fake_supabase = FakeSupabase(fail_insert_attempts=2)
     monkeypatch.setattr(db_module, "supabase", fake_supabase)
-    monkeypatch.setattr(app_module.graph, "invoke", lambda *_args, **_kwargs: {"commit_sha": "sha", "risks": [], "confidence": 0.5})
+    monkeypatch.setattr(
+        app_module.graph,
+        "invoke",
+        lambda *_args, **_kwargs: _v2_graph_state(commit_sha="sha", build_status="passed"),
+    )
     monkeypatch.setattr("time.sleep", lambda *_args, **_kwargs: None)
 
     response = _client().post("/analyze", json={"repo_url": "https://github.com/acme/repo"}, headers=_auth_headers())
@@ -377,107 +412,45 @@ def test_analyze_cache_insert_retries_until_success(monkeypatch):
     assert len(fake_supabase.inserted_payloads) == 1
 
 
-def test_examples_seed_success(monkeypatch):
+def test_analyze_refresh_bypasses_commit_sha_cache_and_upserts(monkeypatch):
     _set_auth(monkeypatch)
-    called = {}
+    _set_common_mocks(monkeypatch)
+    fake_supabase = FakeSupabase(
+        cache_rows=[
+            {
+                "id": "1",
+                "repo_url": "https://github.com/acme/repo",
+                "commit_sha": "sha-cached",
+                "package_path": ".",
+                "schema_version": 2,
+                "result": _v2_graph_state(commit_sha="sha-cached", deploy_briefing="Cached"),
+            }
+        ]
+    )
+    monkeypatch.setattr(db_module, "supabase", fake_supabase)
+    captured = {}
 
-    def fake_seed(**kwargs):
-        called.update(kwargs)
-        return {"inserted": 1, "updated": 2, "skipped": 3, "errors": []}
+    def fake_invoke(state, config=None):
+        captured["state"] = state
+        return _v2_graph_state(commit_sha="sha-cached", deploy_briefing="Fresh")
 
-    monkeypatch.setattr(app_module, "seed_example_bank_from_repos", fake_seed)
+    monkeypatch.setattr(app_module.graph, "invoke", fake_invoke)
 
     response = _client().post(
-        "/examples/seed",
+        "/analyze",
         json={
-            "repo_urls": ["https://github.com/acme/repo"],
-            "github_token": "ghs_x",
-            "max_files_per_repo": 9,
-            "permissive_only": False,
+            "repo_url": "https://github.com/acme/repo",
+            "commit_sha": "sha-cached",
+            "refresh": True,
         },
         headers=_auth_headers(),
     )
 
     assert response.status_code == 200
-    assert response.json() == {"inserted": 1, "updated": 2, "skipped": 3, "errors": []}
-    assert called["repo_urls"] == ["https://github.com/acme/repo"]
-    assert called["github_token"] == "ghs_x"
-    assert called["max_files_per_repo"] == 9
-    assert called["permissive_only"] is False
-
-
-def test_examples_seed_popular_uses_builtin_list(monkeypatch):
-    _set_auth(monkeypatch)
-    called = {}
-
-    def fake_seed(**kwargs):
-        called.update(kwargs)
-        return {"inserted": 0, "updated": 0, "skipped": 1, "errors": []}
-
-    monkeypatch.setattr(app_module, "seed_example_bank_from_repos", fake_seed)
-    monkeypatch.setattr(app_module, "POPULAR_EXAMPLE_REPOS", ["https://github.com/acme/one"])
-
-    response = _client().post("/examples/seed/popular?github_token=mytoken", headers=_auth_headers())
-
-    assert response.status_code == 200
-    assert called["repo_urls"] == ["https://github.com/acme/one"]
-    assert called["github_token"] == "mytoken"
-    assert called["max_files_per_repo"] == 20
-    assert called["permissive_only"] is True
-
-
-def test_examples_preview_requires_auth(monkeypatch):
-    _set_auth(monkeypatch)
-
-    response = _client().post(
-        "/examples/preview",
-        json={"artifact_type": "dockerfile", "detected_stack": "FastAPI", "limit": 2},
-    )
-
-    assert response.status_code == 401
-
-
-def test_examples_preview_rejects_invalid_artifact_type(monkeypatch):
-    _set_auth(monkeypatch)
-
-    response = _client().post(
-        "/examples/preview",
-        json={"artifact_type": "nginx", "detected_stack": "FastAPI", "limit": 2},
-        headers=_auth_headers(),
-    )
-
-    assert response.status_code == 400
-    assert "artifact_type must be" in response.json()["detail"]
-
-
-def test_examples_preview_success(monkeypatch):
-    _set_auth(monkeypatch)
-    called = {}
-
-    def fake_fetch(**kwargs):
-        called.update(kwargs)
-        return [{"source_repo": "acme/repo", "snippet": "FROM python"}]
-
-    monkeypatch.setattr(app_module, "fetch_reference_examples", fake_fetch)
-
-    response = _client().post(
-        "/examples/preview",
-        json={
-            "artifact_type": "dockerfile",
-            "detected_stack": "FastAPI",
-            "service": {"name": "api", "build_context": "."},
-            "limit": 2,
-        },
-        headers=_auth_headers(),
-    )
-
-    assert response.status_code == 200
-    assert response.json()["examples"][0]["source_repo"] == "acme/repo"
-    assert called["artifact_type"] == "dockerfile"
-    assert called["detected_stack"] == "FastAPI"
-    assert called["stack_tokens"] == []
-    assert called["service"] == {"name": "api", "build_context": "."}
-    assert called["limit"] == 2
+    assert response.json()["deploy_briefing"] == "Fresh"
+    assert captured["state"]["_skip_cache"] is True
+    assert len(fake_supabase.upserted_payloads) == 1
+    assert fake_supabase.upserted_payloads[0]["commit_sha"] == "sha-cached"
 
 
 def test_delete_cache_returns_503_when_supabase_missing(monkeypatch):
@@ -511,8 +484,8 @@ def test_delete_cache_with_commit_sha_success(monkeypatch):
         "supabase",
         FakeSupabase(
             cache_rows=[
-                {"id": "1", "repo_url": "https://github.com/acme/repo", "commit_sha": "a", "package_path": ".", "service_name": None, "result": {}},
-                {"id": "2", "repo_url": "https://github.com/acme/repo", "commit_sha": "b", "package_path": ".", "service_name": None, "result": {}},
+                {"id": "1", "repo_url": "https://github.com/acme/repo", "commit_sha": "a", "package_path": ".", "schema_version": 2, "result": {"schema_version": 2}},
+                {"id": "2", "repo_url": "https://github.com/acme/repo", "commit_sha": "b", "package_path": ".", "schema_version": 2, "result": {"schema_version": 2}},
             ]
         ),
     )
@@ -530,7 +503,6 @@ def test_delete_cache_with_commit_sha_success(monkeypatch):
         "repo_url": "https://github.com/acme/repo",
         "commit_sha": "b",
         "package_path": ".",
-        "service_name": None,
     }
 
 
@@ -538,9 +510,9 @@ def test_delete_cache_by_repo_success(monkeypatch):
     _set_auth(monkeypatch)
     fake_supabase = FakeSupabase(
         cache_rows=[
-            {"id": "1", "repo_url": "https://github.com/acme/repo", "commit_sha": "a", "package_path": ".", "service_name": None, "result": {}},
-            {"id": "2", "repo_url": "https://github.com/acme/repo", "commit_sha": "b", "package_path": ".", "service_name": None, "result": {}},
-            {"id": "3", "repo_url": "https://github.com/acme/other", "commit_sha": "z", "package_path": ".", "service_name": None, "result": {}},
+            {"id": "1", "repo_url": "https://github.com/acme/repo", "commit_sha": "a", "package_path": ".", "schema_version": 2, "result": {"schema_version": 2}},
+            {"id": "2", "repo_url": "https://github.com/acme/repo", "commit_sha": "b", "package_path": ".", "schema_version": 2, "result": {"schema_version": 2}},
+            {"id": "3", "repo_url": "https://github.com/acme/other", "commit_sha": "z", "package_path": ".", "schema_version": 2, "result": {"schema_version": 2}},
         ]
     )
     monkeypatch.setattr(db_module, "supabase", fake_supabase)
@@ -582,7 +554,7 @@ def test_analyze_stream_emits_error_event_from_node(monkeypatch):
     assert events[1][1]["detail"] == "scanner failed"
 
 
-def test_analyze_stream_emits_preflight_error_event(monkeypatch):
+def test_analyze_stream_emits_structured_error_event(monkeypatch):
     _set_auth(monkeypatch)
     _set_common_mocks(monkeypatch)
 
@@ -591,12 +563,10 @@ def test_analyze_stream_emits_preflight_error_event(monkeypatch):
         assert len(callbacks) == 1
         yield {"scanner": {"commit_sha": "sha-stream"}}
         yield {
-            "preflight": {
-                "preflight_issues": ["web: COPY source '../package.json' escapes build context 'apps/web'"],
+            "railpack_build_repair": {
                 "error": {
-                    "code": "preflight_failed",
-                    "message": "Static preflight checks failed for generated Dockerfiles.",
-                    "issues": ["web: COPY source '../package.json' escapes build context 'apps/web'"],
+                    "code": "build_failed",
+                    "message": "Railpack build failed for deploy unit api.",
                 },
             }
         }
@@ -610,7 +580,7 @@ def test_analyze_stream_emits_preflight_error_event(monkeypatch):
     assert events[0][0] == "progress"
     assert events[1][0] == "progress"
     assert events[2][0] == "error"
-    assert events[2][1]["detail"]["code"] == "preflight_failed"
+    assert events[2][1]["detail"]["code"] == "build_failed"
 
 
 def test_analyze_stream_emits_cached_complete_and_backfills_fields(monkeypatch):
@@ -623,13 +593,10 @@ def test_analyze_stream_emits_cached_complete_and_backfills_fields(monkeypatch):
         yield {
             "scanner": {
                 "commit_sha": "stream-sha",
-                "cached_response": {
-                    "stack_summary": "Python",
-                    "services": [],
-                    "dockerfiles": {},
-                    "risks": [],
-                    "confidence": 0.88,
-                },
+                "cached_response": _v2_graph_state(
+                    commit_sha="stream-sha",
+                    deploy_briefing="Python API",
+                ),
             }
         }
 
@@ -638,13 +605,13 @@ def test_analyze_stream_emits_cached_complete_and_backfills_fields(monkeypatch):
     response = _client().post("/analyze/stream", json={"repo_url": "https://github.com/acme/repo"}, headers=_auth_headers())
 
     events = _parse_sse(response.text)
-    # Cache hits should still look like a full run to clients.
     progress_nodes = [data["node"] for (name, data) in events if name == "progress"]
     assert progress_nodes[:1] == ["scanner"]
-    assert "planner" in progress_nodes
-    assert "docker_gen" in progress_nodes
+    assert "clone_repo" in progress_nodes
+    assert "finalize" in progress_nodes
     assert events[-1][0] == "complete"
     assert events[-1][1]["commit_sha"] == "stream-sha"
+    assert events[-1][1]["schema_version"] == 2
     assert events[-1][1]["token_usage"]["total_tokens"] == 18
 
 
@@ -658,15 +625,8 @@ def test_analyze_stream_success_caches_and_completes(monkeypatch):
         callbacks = config.get("callbacks", []) if config else []
         assert len(callbacks) == 1
         yield {"scanner": {"commit_sha": "sha-stream"}}
-        yield {
-            "planner": {
-                "detected_stack": "FastAPI",
-                "services": [{"name": "api", "build_context": ".", "port": 8000}],
-                "dockerfiles": {"Dockerfile": "FROM python:3.11"},
-                "risks": ["none"],
-                "confidence": 0.9,
-            }
-        }
+        yield {"classifier": {"deploy_units": [{"name": "api", "root": ".", "type": "server", "port": 8000}]}}
+        yield {"finalize": _v2_graph_state(commit_sha="sha-stream", package_path="services/api")}
 
     monkeypatch.setattr(app_module.graph, "astream", fake_astream)
 
@@ -680,9 +640,11 @@ def test_analyze_stream_success_caches_and_completes(monkeypatch):
     assert events[-1][0] == "complete"
     assert events[-1][1]["response_id"]
     assert events[-1][1]["commit_sha"] == "sha-stream"
+    assert events[-1][1]["schema_version"] == 2
     assert events[-1][1]["token_usage"]["total_tokens"] == 18
     assert len(fake_supabase.inserted_payloads) == 1
-    assert fake_supabase.inserted_payloads[0]["result"]["_cache_package_path"] == "services/api"
+    assert fake_supabase.inserted_payloads[0]["package_path"] == "services/api"
+    assert fake_supabase.inserted_payloads[0]["schema_version"] == 2
     assert len(fake_supabase.response_log_payloads) == 1
     assert fake_supabase.response_log_payloads[0]["endpoint"] == "/analyze/stream"
 
@@ -696,8 +658,8 @@ def test_response_status_false_updates_and_deletes_cache(monkeypatch):
                 "repo_url": "https://github.com/acme/repo",
                 "commit_sha": "sha-1",
                 "package_path": ".",
-                "service_name": None,
-                "result": {"ok": True},
+                "schema_version": 2,
+                "result": {"schema_version": 2, "build_status": "passed"},
             }
         ]
     )
@@ -707,9 +669,8 @@ def test_response_status_false_updates_and_deletes_cache(monkeypatch):
             "repo_url": "https://github.com/acme/repo",
             "commit_sha": "sha-1",
             "package_path": ".",
-            "service_name": None,
             "passed": False,
-            "payload": {"ok": True},
+            "payload": {"schema_version": 2, "build_status": "passed"},
         }
     ]
     monkeypatch.setattr(db_module, "supabase", fake_supabase)
@@ -761,16 +722,8 @@ def test_analyze_rejects_unauthenticated_even_for_cached_commit(monkeypatch):
                     "repo_url": "https://github.com/acme/repo",
                     "commit_sha": "sha-cached",
                     "package_path": ".",
-                    "service_name": None,
-                    "result": {
-                        "commit_sha": "sha-cached",
-                        "stack_summary": "FastAPI",
-                        "services": [],
-                        "dockerfiles": {},
-                        "risks": [],
-                        "confidence": 0.9,
-                        "_cache_package_path": ".",
-                    },
+                    "schema_version": 2,
+                    "result": _v2_graph_state(commit_sha="sha-cached", deploy_briefing="FastAPI"),
                 }
             ]
         ),
@@ -802,6 +755,11 @@ def test_analyze_rejects_unauthenticated_when_cache_missing(monkeypatch):
 def test_feedback_stream_success_emits_progress_and_complete(monkeypatch):
     _set_auth(monkeypatch)
     _set_common_mocks(monkeypatch)
+    cached = _v2_graph_state(
+        commit_sha="sha-1",
+        deploy_briefing="FastAPI",
+        build_status="passed",
+    )
     fake_supabase = FakeSupabase(
         cache_rows=[
             {
@@ -809,21 +767,9 @@ def test_feedback_stream_success_emits_progress_and_complete(monkeypatch):
                 "repo_url": "https://github.com/acme/repo",
                 "commit_sha": "sha-1",
                 "package_path": ".",
-                "service_name": None,
-                "result": {
-                    "commit_sha": "sha-1",
-                    "stack_summary": "FastAPI",
-                    "services": [{"name": "api", "build_context": ".", "port": 8000}],
-                    "dockerfiles": {"api": "FROM python:3.11"},
-                    "docker_compose": "services:\n  api:\n    build: .\n",
-                    "nginx_conf": "events {}\nhttp { server { listen 80; } }\n",
-                    "has_existing_dockerfiles": False,
-                    "has_existing_compose": False,
-                    "risks": ["old-risk"],
-                    "confidence": 0.5,
-                    "hadolint_results": {"api": "old"},
-                    "_cache_package_path": ".",
-                },
+                "schema_version": 2,
+                "response_id": "resp-cache",
+                "result": cached,
             }
         ]
     )
@@ -832,21 +778,13 @@ def test_feedback_stream_success_emits_progress_and_complete(monkeypatch):
     async def fake_feedback_astream(_initial_state, config=None):
         callbacks = config.get("callbacks", []) if config else []
         assert len(callbacks) == 1
-        yield {"feedback_coordinator": {"change_plan": []}}
+        yield {"clone_repo": {"repo_dir": "/tmp/repo"}}
         yield {
-            "feedback_verifier": {
-                "commit_sha": "sha-1",
-                "detected_stack": "FastAPI",
-                "services": [{"name": "api", "build_context": ".", "port": 8000}],
-                "dockerfiles": {"Dockerfile": "FROM python:3.12"},
-                "docker_compose": "services:\n  api:\n    build: .\n",
-                "nginx_conf": "events {}\nhttp { server { listen 80; } }\n",
-                "has_existing_dockerfiles": False,
-                "has_existing_compose": False,
-                "risks": ["new-risk"],
-                "confidence": 0.91,
-                "hadolint_results": {"api": ""},
-            }
+            "finalize": _v2_graph_state(
+                commit_sha="sha-1",
+                deploy_briefing="FastAPI with healthcheck",
+                build_status="passed",
+            )
         }
 
     monkeypatch.setattr("graph.feedback.feedback_graph.astream", fake_feedback_astream)
@@ -866,7 +804,8 @@ def test_feedback_stream_success_emits_progress_and_complete(monkeypatch):
     assert events[0][0] == "progress"
     assert events[-1][0] == "complete"
     assert events[-1][1]["commit_sha"] == "sha-1"
-    assert events[-1][1]["confidence"] == 0.91
+    assert events[-1][1]["schema_version"] == 2
+    assert events[-1][1]["deploy_briefing"] == "FastAPI with healthcheck"
     assert events[-1][1]["token_usage"]["total_tokens"] == 18
     assert len(fake_supabase.upserted_payloads) == 1
 
@@ -890,7 +829,7 @@ def test_feedback_stream_emits_error_when_cache_missing(monkeypatch):
     events = _parse_sse(response.text)
     assert len(events) == 1
     assert events[0][0] == "error"
-    assert "No cached analysis found" in events[0][1]["detail"]
+    assert "No cached v2 analysis found" in events[0][1]["detail"]
 
 
 class _FakeFetchTool:
@@ -948,7 +887,6 @@ def test_analyze_rejects_broad_root_scope_with_suggestions(monkeypatch):
     assert detail["code"] == "scope_required"
     assert detail["tree_entry_count"] == 5200
     assert len(detail["suggested_package_paths"]) == 10
-    assert detail["suggested_service_names"] == ["api", "web", "worker"]
 
 
 def test_analyze_stream_emits_scope_required_error_event(monkeypatch):
@@ -1026,14 +964,21 @@ def test_scoped_package_path_bypasses_scope_guard(monkeypatch):
         if state.get("error"):
             return state
         state.update(
-            {
-                "detected_stack": "Next.js",
-                "stack_tokens": ["next", "react"],
-                "services": [{"name": "dashboard", "build_context": "apps/dashboard", "port": 3000}],
-                "dockerfiles": {"apps/dashboard/Dockerfile": "FROM node:20"},
-                "risks": [],
-                "confidence": 0.9,
-            }
+            _v2_graph_state(
+                commit_sha="sha-2",
+                package_path="apps/dashboard",
+                deploy_shape="static_build",
+                deploy_briefing="Next.js dashboard",
+                deploy_units=[
+                    {
+                        "name": "dashboard",
+                        "root": "apps/dashboard",
+                        "type": "static_build",
+                        "framework": "next",
+                        "port": 3000,
+                    }
+                ],
+            )
         )
         return state
 
@@ -1046,58 +991,10 @@ def test_scoped_package_path_bypasses_scope_guard(monkeypatch):
     )
 
     assert response.status_code == 200
-    assert response.json()["commit_sha"] == "sha-2"
-
-
-def test_service_name_bypasses_scope_guard_when_unique(monkeypatch):
-    _set_auth(monkeypatch)
-    _set_common_mocks(monkeypatch)
-    monkeypatch.setattr(db_module, "supabase", None)
-    monkeypatch.setenv("SD_SCOPE_GUARD_ENABLED", "true")
-
-    _install_fake_scanner(
-        monkeypatch,
-        {
-            "repo_full_name": "acme/repo",
-            "default_branch": "main",
-            "commit_sha": "sha-3",
-            "language": "TypeScript",
-            "key_files": {},
-            "dirs": [],
-            "tree_entry_count": 9000,
-            "candidate_package_paths": [f"apps/app-{i}" for i in range(1, 45)],
-            "candidate_service_hints": ["api", "worker"],
-        },
-    )
-
-    def fake_invoke(initial_state, config=None):
-        import graph.nodes.scanner as scanner_module
-
-        state = scanner_module.scanner_node(dict(initial_state))
-        if state.get("error"):
-            return state
-        state.update(
-            {
-                "detected_stack": "FastAPI",
-                "stack_tokens": ["python", "fastapi"],
-                "services": [{"name": "api", "build_context": "services/api", "port": 8000}],
-                "dockerfiles": {"services/api/Dockerfile": "FROM python:3.11"},
-                "risks": [],
-                "confidence": 0.87,
-            }
-        )
-        return state
-
-    monkeypatch.setattr(app_module.graph, "invoke", fake_invoke)
-
-    response = _client().post(
-        "/analyze",
-        json={"repo_url": "https://github.com/acme/repo", "package_path": ".", "service_name": "api"},
-        headers=_auth_headers(),
-    )
-
-    assert response.status_code == 200
-    assert response.json()["services"][0]["name"] == "api"
+    payload = response.json()
+    assert payload["commit_sha"] == "sha-2"
+    assert payload["schema_version"] == 2
+    assert payload["deploy_units"][0]["name"] == "dashboard"
 
 
 def test_scope_guard_threshold_env_overrides(monkeypatch):
@@ -1122,10 +1019,10 @@ def test_scope_guard_threshold_env_overrides(monkeypatch):
     monkeypatch.setenv("SD_SCOPE_GUARD_ENABLED", "true")
     monkeypatch.setenv("SD_SCOPE_GUARD_TREE_THRESHOLD", "10000")
     monkeypatch.setenv("SD_SCOPE_GUARD_PACKAGE_THRESHOLD", "100")
-    state = scanner_module.scanner_node({"repo_url": "https://github.com/acme/repo", "package_path": ".", "service_name": None})
+    state = scanner_module.scanner_node({"repo_url": "https://github.com/acme/repo", "package_path": "."})
     assert "error" not in state
 
     monkeypatch.setenv("SD_SCOPE_GUARD_TREE_THRESHOLD", "100")
     monkeypatch.setenv("SD_SCOPE_GUARD_PACKAGE_THRESHOLD", "2")
-    state = scanner_module.scanner_node({"repo_url": "https://github.com/acme/repo", "package_path": ".", "service_name": None})
+    state = scanner_module.scanner_node({"repo_url": "https://github.com/acme/repo", "package_path": "."})
     assert state["error"]["code"] == "scope_required"

@@ -3,31 +3,24 @@ from typing import Dict, Any
 
 from .nodes import (
     scanner_node,
-    planner_node,
-    dockerfile_generator_node,
-    commands_generator_node,
-    compose_generator_node,
-    nginx_generator_node,
-    verifier_node,
-    build_verify_node,
-    preflight_node,
+    clone_repo_node,
+    classifier_node,
+    railpack_prepare_node,
+    deploy_briefing_node,
+    railpack_build_repair_node,
+    finalize_node,
 )
 
-# State is a plain dict
 workflow = StateGraph(dict)
 
 workflow.add_node("scanner", scanner_node)
-workflow.add_node("planner", planner_node)
-workflow.add_node("commands_gen", commands_generator_node)
-workflow.add_node("docker_gen", dockerfile_generator_node)
-workflow.add_node("compose_gen", compose_generator_node)
-workflow.add_node("nginx_gen", nginx_generator_node)
-workflow.add_node("verifier", verifier_node)
-workflow.add_node("build_verify", build_verify_node)
-workflow.add_node("preflight", preflight_node)
+workflow.add_node("clone_repo", clone_repo_node)
+workflow.add_node("classifier", classifier_node)
+workflow.add_node("railpack_prepare", railpack_prepare_node)
+workflow.add_node("deploy_briefing", deploy_briefing_node)
+workflow.add_node("railpack_build_repair", railpack_build_repair_node)
+workflow.add_node("finalize", finalize_node)
 
-
-# ─── Conditional Edges ──────────────────────────────────────────────────────────
 
 def check_scanner_error(state: Dict[str, Any]) -> str:
     """Route to END if scanner found an error or if cached_response is present."""
@@ -35,90 +28,44 @@ def check_scanner_error(state: Dict[str, Any]) -> str:
         return "error_or_cached"
     return "continue"
 
-def check_planner_error(state: Dict[str, Any]) -> str:
-    """Route to END if planner found the repo is not deployable."""
+
+def check_fatal_error(state: Dict[str, Any]) -> str:
+    """Route to END when a prior node set a fatal error."""
     return "error" if state.get("error") else "continue"
 
 
-def check_compose_required(state: Dict[str, Any]) -> str:
-    """Generate compose only when there are multiple app services."""
-    services = state.get("services")
-    if not isinstance(services, list) or len(services) <= 1:
-        return "skip"
-        
-    package_path = state.get("package_path", ".")
-    from graph.nodes.planner import _normalize_ctx
-    package_norm = _normalize_ctx(package_path)
-    
-    # If all services share the exact same expected container logic path, and it's an explicit 
-    # sub-package deploy, we don't need compose - it's a single container.
-    if package_norm != ".":
-        all_same_context = all(
-            _normalize_ctx(svc.get("build_context", ".")) == package_norm or 
-            (_normalize_ctx(svc.get("dockerfile_path", "")) and _normalize_ctx(svc.get("dockerfile_path", "")).startswith(package_norm))
-            for svc in services
-        )
-        if all_same_context:
-            return "skip"
-            
-    return "compose"
-
-
-def is_build_verify_enabled() -> bool:
-    import os
-    raw = os.getenv("SD_RAILPACK_VERIFY_ENABLED", "")
-    return raw.strip().lower() in {"1", "true", "yes", "on"}
-
-
-def check_build_verify_required(_state: Dict[str, Any]) -> str:
-    return "verify" if is_build_verify_enabled() else "skip"
-
-
-# Entry point
 workflow.set_entry_point("scanner")
 
-# Scanner -> Planner (or END on error/cache)
 workflow.add_conditional_edges(
     "scanner",
     check_scanner_error,
     {
         "error_or_cached": END,
-        "continue": "planner",
+        "continue": "clone_repo",
     },
 )
 
-# Planner -> Commands gen (or END on error)
 workflow.add_conditional_edges(
-    "planner",
-    check_planner_error,
+    "clone_repo",
+    check_fatal_error,
     {
         "error": END,
-        "continue": "commands_gen",
+        "continue": "classifier",
     },
 )
 
-# Flow: commands_gen -> docker_gen -> compose_gen (if needed) -> nginx_gen -> (optional build_verify) -> preflight -> verifier -> END
-workflow.add_edge("commands_gen", "docker_gen")
 workflow.add_conditional_edges(
-    "docker_gen",
-    check_compose_required,
+    "classifier",
+    check_fatal_error,
     {
-        "compose": "compose_gen",
-        "skip": "nginx_gen",
+        "error": END,
+        "continue": "railpack_prepare",
     },
 )
-workflow.add_edge("compose_gen", "nginx_gen")
-workflow.add_edge("nginx_gen", "verifier")
-workflow.add_conditional_edges(
-    "nginx_gen",
-    check_build_verify_required,
-    {
-        "verify": "build_verify",
-        "skip": "preflight",
-    },
-)
-workflow.add_edge("build_verify", "preflight")
-workflow.add_edge("preflight", "verifier")
-workflow.add_edge("verifier", END)
+
+workflow.add_edge("railpack_prepare", "deploy_briefing")
+workflow.add_edge("deploy_briefing", "railpack_build_repair")
+workflow.add_edge("railpack_build_repair", "finalize")
+workflow.add_edge("finalize", END)
 
 graph = workflow.compile()

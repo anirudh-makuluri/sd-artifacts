@@ -77,9 +77,8 @@ def test_build_analysis_cache_uri_supports_default_and_scoped_reads():
             "https://github.com/acme/repo",
             "abc123",
             package_path="services/api",
-            service_name="api",
         )
-        == "analysis-cache://aHR0cHM6Ly9naXRodWIuY29tL2FjbWUvcmVwbw/abc123/c2VydmljZXMvYXBp/YXBp"
+        == "analysis-cache://aHR0cHM6Ly9naXRodWIuY29tL2FjbWUvcmVwbw/abc123/c2VydmljZXMvYXBp"
     )
 
 
@@ -92,14 +91,17 @@ def test_mcp_server_reads_analysis_resources(monkeypatch):
                 "repo_url": "https://github.com/acme/repo",
                 "commit_sha": "abc123",
                 "package_path": ".",
-                "service_name": None,
                 "from_cache": False,
                 "passed": True,
                 "created_at": "2026-05-19T22:00:00Z",
+                "schema_version": 2,
+                "build_status": "passed",
+                "deploy_shape": "server",
+                "railpack_version": None,
                 "payload": {
                     "response_id": "resp-1",
-                    "_cache_package_path": ".",
-                    "stack_summary": "FastAPI",
+                    "schema_version": 2,
+                    "deploy_briefing": "FastAPI",
                 },
             }
         ],
@@ -109,11 +111,16 @@ def test_mcp_server_reads_analysis_resources(monkeypatch):
                 "repo_url": "https://github.com/acme/repo",
                 "commit_sha": "abc123",
                 "package_path": ".",
-                "service_name": None,
                 "created_at": "2026-05-19T22:05:00Z",
+                "schema_version": 2,
+                "build_status": "passed",
+                "deploy_shape": "server",
+                "railpack_version": None,
+                "pipeline_duration_ms": 500,
+                "workflow_version": "sd-artifacts@dev",
                 "result": {
-                    "_cache_package_path": ".",
-                    "stack_summary": "FastAPI",
+                    "schema_version": 2,
+                    "deploy_briefing": "FastAPI",
                 },
             }
         ],
@@ -135,13 +142,19 @@ def test_mcp_server_reads_analysis_resources(monkeypatch):
             assert response_payload["id"] == "resp-1"
             assert response_payload["payload"] == {
                 "response_id": "resp-1",
-                "stack_summary": "FastAPI",
+                "schema_version": 2,
+                "deploy_briefing": "FastAPI",
             }
-            assert cache_payload["result"] == {"stack_summary": "FastAPI"}
+            assert cache_payload["result"] == {
+                "schema_version": 2,
+                "deploy_briefing": "FastAPI",
+            }
 
             templates = await session.list_resource_templates()
             uris = {item.uriTemplate for item in templates.resourceTemplates}
             assert "analysis-response://{response_id}" in uris
             assert "analysis-cache://{repo_url_b64}/{commit_sha}" in uris
+            assert "analysis-cache://{repo_url_b64}/{commit_sha}/{package_path_b64}" in uris
+            assert not any("service_name" in uri for uri in uris)
 
     asyncio.run(_run())
