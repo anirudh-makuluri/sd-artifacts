@@ -66,14 +66,17 @@ def test_get_analysis_response_by_id_returns_curated_payload():
                 "repo_url": "https://github.com/acme/repo",
                 "commit_sha": "abc123",
                 "package_path": "./services/api",
-                "service_name": " api ",
                 "from_cache": True,
                 "passed": True,
                 "created_at": "2026-05-19T22:00:00Z",
+                "schema_version": 2,
+                "build_status": "passed",
+                "deploy_shape": "server",
+                "railpack_version": "0.1.0",
                 "payload": {
                     "response_id": "resp-1",
-                    "_cache_package_path": "services/api",
-                    "stack_summary": "FastAPI",
+                    "schema_version": 2,
+                    "deploy_briefing": "FastAPI service",
                 },
             }
         ]
@@ -87,13 +90,17 @@ def test_get_analysis_response_by_id_returns_curated_payload():
         "repo_url": "https://github.com/acme/repo",
         "commit_sha": "abc123",
         "package_path": "services/api",
-        "service_name": "api",
         "from_cache": True,
         "passed": True,
         "created_at": "2026-05-19T22:00:00Z",
+        "schema_version": 2,
+        "build_status": "passed",
+        "deploy_shape": "server",
+        "railpack_version": "0.1.0",
         "payload": {
             "response_id": "resp-1",
-            "stack_summary": "FastAPI",
+            "schema_version": 2,
+            "deploy_briefing": "FastAPI service",
         },
     }
 
@@ -106,11 +113,16 @@ def test_get_analysis_cache_entry_strips_internal_metadata():
                 "repo_url": "https://github.com/acme/repo",
                 "commit_sha": "abc123",
                 "package_path": "services/api",
-                "service_name": None,
                 "created_at": "2026-05-19T22:10:00Z",
+                "schema_version": 2,
+                "build_status": "passed",
+                "deploy_shape": "server",
+                "railpack_version": "0.1.0",
+                "pipeline_duration_ms": 1200,
+                "workflow_version": "sd-artifacts@dev",
                 "result": {
-                    "_cache_package_path": "services/api",
-                    "stack_summary": "FastAPI",
+                    "schema_version": 2,
+                    "deploy_briefing": "FastAPI service",
                 },
             }
         ]
@@ -128,10 +140,16 @@ def test_get_analysis_cache_entry_strips_internal_metadata():
         "repo_url": "https://github.com/acme/repo",
         "commit_sha": "abc123",
         "package_path": "services/api",
-        "service_name": None,
         "created_at": "2026-05-19T22:10:00Z",
+        "schema_version": 2,
+        "build_status": "passed",
+        "deploy_shape": "server",
+        "railpack_version": "0.1.0",
+        "pipeline_duration_ms": 1200,
+        "workflow_version": "sd-artifacts@dev",
         "result": {
-            "stack_summary": "FastAPI",
+            "schema_version": 2,
+            "deploy_briefing": "FastAPI service",
         },
     }
 

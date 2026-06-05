@@ -11,7 +11,6 @@ from services.analysis_store import (
     get_analysis_cache_entry,
     get_analysis_response_by_id,
     normalize_package_path,
-    normalize_service_name,
 )
 
 DEFAULT_TRANSPORT = "stdio"
@@ -36,18 +35,13 @@ def build_analysis_cache_uri(
     repo_url: str,
     commit_sha: str,
     package_path: str = ".",
-    service_name: str | None = None,
 ) -> str:
     repo_url_b64 = _b64_encode(repo_url)
     package_path_b64 = _b64_encode(normalize_package_path(package_path))
 
-    if normalize_service_name(service_name) is None:
-        if normalize_package_path(package_path) == ".":
-            return f"analysis-cache://{repo_url_b64}/{commit_sha}"
-        return f"analysis-cache://{repo_url_b64}/{commit_sha}/{package_path_b64}"
-
-    service_name_b64 = _b64_encode(normalize_service_name(service_name) or "")
-    return f"analysis-cache://{repo_url_b64}/{commit_sha}/{package_path_b64}/{service_name_b64}"
+    if normalize_package_path(package_path) == ".":
+        return f"analysis-cache://{repo_url_b64}/{commit_sha}"
+    return f"analysis-cache://{repo_url_b64}/{commit_sha}/{package_path_b64}"
 
 
 def _build_server() -> FastMCP:
@@ -55,7 +49,7 @@ def _build_server() -> FastMCP:
         "Read-only MCP server for SD-Artifacts. "
         "Use analysis-response resources for stored historical responses by response_id. "
         "Use analysis-cache resources for exact cache-key lookups. "
-        "analysis-cache URI parameters are base64url-encoded for repo_url, package_path, and service_name segments."
+        "analysis-cache URI parameters are base64url-encoded for repo_url and package_path segments."
     )
     return FastMCP(
         name="SD-Artifacts MCP",
@@ -78,14 +72,13 @@ def _read_analysis_response(response_id: str) -> dict:
         raise ValueError(str(exc)) from exc
 
 
-def _read_analysis_cache(repo_url_b64: str, commit_sha: str, package_path: str, service_name: str | None) -> dict:
+def _read_analysis_cache(repo_url_b64: str, commit_sha: str, package_path: str) -> dict:
     repo_url = _b64_decode(repo_url_b64)
     try:
         return get_analysis_cache_entry(
             repo_url=repo_url,
             commit_sha=commit_sha,
             package_path=package_path,
-            service_name=service_name,
         )
     except AnalysisStoreError as exc:
         raise ValueError(str(exc)) from exc
@@ -110,7 +103,7 @@ def analysis_response_resource(response_id: str) -> dict:
     mime_type="application/json",
 )
 def analysis_cache_root_resource(repo_url_b64: str, commit_sha: str) -> dict:
-    return _read_analysis_cache(repo_url_b64, commit_sha, package_path=".", service_name=None)
+    return _read_analysis_cache(repo_url_b64, commit_sha, package_path=".")
 
 
 @mcp.resource(
@@ -125,31 +118,6 @@ def analysis_cache_package_resource(repo_url_b64: str, commit_sha: str, package_
         repo_url_b64,
         commit_sha,
         package_path=_b64_decode(package_path_b64),
-        service_name=None,
-    )
-
-
-@mcp.resource(
-    "analysis-cache://{repo_url_b64}/{commit_sha}/{package_path_b64}/{service_name_b64}",
-    name="analysis_cache_service",
-    title="Analysis Cache",
-    description=(
-        "Read a cached service-scoped analysis snapshot by encoded repo_url, commit_sha, "
-        "package_path, and service_name."
-    ),
-    mime_type="application/json",
-)
-def analysis_cache_service_resource(
-    repo_url_b64: str,
-    commit_sha: str,
-    package_path_b64: str,
-    service_name_b64: str,
-) -> dict:
-    return _read_analysis_cache(
-        repo_url_b64,
-        commit_sha,
-        package_path=_b64_decode(package_path_b64),
-        service_name=_b64_decode(service_name_b64),
     )
 
 

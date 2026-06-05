@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from copy import deepcopy
-from typing import Any, Optional
+from typing import Any
 
 
 class AnalysisStoreError(Exception):
@@ -35,11 +35,6 @@ def normalize_package_path(path: str | None) -> str:
     return normalized or "."
 
 
-def normalize_service_name(value: str | None) -> str | None:
-    normalized = (value or "").strip()
-    return normalized or None
-
-
 def _sanitize_payload(payload: Any) -> Any:
     if isinstance(payload, dict):
         sanitized = deepcopy(payload)
@@ -55,7 +50,8 @@ def get_analysis_response_by_id(response_id: str, supabase_client: Any = None) -
         response = (
             supabase.table("analysis_responses")
             .select(
-                "id,endpoint,repo_url,commit_sha,package_path,service_name,from_cache,passed,payload,created_at"
+                "id,endpoint,repo_url,commit_sha,package_path,from_cache,passed,payload,created_at,"
+                "schema_version,build_status,deploy_shape,railpack_version"
             )
             .eq("id", response_id)
             .single()
@@ -74,10 +70,13 @@ def get_analysis_response_by_id(response_id: str, supabase_client: Any = None) -
         "repo_url": row.get("repo_url"),
         "commit_sha": row.get("commit_sha"),
         "package_path": normalize_package_path(row.get("package_path")),
-        "service_name": normalize_service_name(row.get("service_name")),
         "from_cache": bool(row.get("from_cache", False)),
         "passed": bool(row.get("passed", False)),
         "created_at": row.get("created_at"),
+        "schema_version": row.get("schema_version"),
+        "build_status": row.get("build_status"),
+        "deploy_shape": row.get("deploy_shape"),
+        "railpack_version": row.get("railpack_version"),
         "payload": _sanitize_payload(row.get("payload")),
     }
 
@@ -86,27 +85,24 @@ def get_analysis_cache_entry(
     repo_url: str,
     commit_sha: str,
     package_path: str = ".",
-    service_name: Optional[str] = None,
     supabase_client: Any = None,
 ) -> dict[str, Any]:
     supabase = _get_supabase_client(supabase_client)
     normalized_package_path = normalize_package_path(package_path)
-    normalized_service_name = normalize_service_name(service_name)
 
     try:
-        query = (
+        response = (
             supabase.table("analysis_cache")
-            .select("response_id,repo_url,commit_sha,package_path,service_name,result,created_at")
+            .select(
+                "response_id,repo_url,commit_sha,package_path,result,created_at,"
+                "schema_version,build_status,deploy_shape,railpack_version,pipeline_duration_ms,workflow_version"
+            )
             .eq("repo_url", repo_url)
             .eq("commit_sha", commit_sha)
             .eq("package_path", normalized_package_path)
+            .single()
+            .execute()
         )
-        if normalized_service_name is None:
-            query = query.is_("service_name", None)
-        else:
-            query = query.eq("service_name", normalized_service_name)
-
-        response = query.single().execute()
     except Exception as exc:
         raise AnalysisStoreNotFoundError(
             f"Analysis cache not found for {repo_url}@{commit_sha}"
@@ -121,7 +117,12 @@ def get_analysis_cache_entry(
         "repo_url": row.get("repo_url"),
         "commit_sha": row.get("commit_sha"),
         "package_path": normalize_package_path(row.get("package_path")),
-        "service_name": normalize_service_name(row.get("service_name")),
         "created_at": row.get("created_at"),
+        "schema_version": row.get("schema_version"),
+        "build_status": row.get("build_status"),
+        "deploy_shape": row.get("deploy_shape"),
+        "railpack_version": row.get("railpack_version"),
+        "pipeline_duration_ms": row.get("pipeline_duration_ms"),
+        "workflow_version": row.get("workflow_version"),
         "result": _sanitize_payload(row.get("result")),
     }

@@ -4,14 +4,10 @@ This project uses a shared retry wrapper for robustness around LLM and parsing f
 
 ## Nodes Covered
 
-The following nodes run through shared retry logic:
-- Planner
-- Dockerfile generator
-- Compose generator
-- Nginx generator
-- Verifier
-- Feedback coordinator
-- Feedback remediation agents
+The following v2 nodes run through shared retry logic:
+
+- `deploy_briefing` — markdown deploy briefing generation
+- `railpack_build_repair` — AI diagnosis and patch when Railpack build fails
 
 ## Retry Behavior
 
@@ -24,6 +20,7 @@ The following nodes run through shared retry logic:
 
 - Each node has a maximum execution time budget.
 - Time budgets protect API responsiveness and avoid hangs.
+- Railpack build subprocess timeout is controlled separately via `SD_RAILPACK_VERIFY_TIMEOUT_SECONDS`.
 
 ## Prompt Fallback
 
@@ -33,9 +30,11 @@ The following nodes run through shared retry logic:
 ## Configuration Location
 
 Current defaults are defined in:
+
 - `graph/nodes/llm_config.py`
 
 Primary settings:
+
 - `RETRY_CONFIGS`
 - `FALLBACK_PROMPTS`
 

@@ -1,23 +1,29 @@
-# Feedback Remediation Workflow
+# Feedback Remediation Workflow (v2)
 
-The feedback pipeline lets you revise generated artifacts without re-running a full repository scan. It operates on an existing cached analysis identified by `repo_url + commit_sha + package_path`.
+The feedback pipeline re-runs Railpack build verification with user guidance. It does not regenerate Dockerfiles, compose, or nginx configs.
 
 ## When to Use It
 
 Use `POST /feedback` or `POST /feedback/stream` when:
 
-- generated Dockerfiles, compose output, or nginx config need targeted fixes
-- you want to preserve the same commit context and iterate on the artifacts
-- you already have a cached analysis for the target repository revision
+- a prior `/analyze` run produced a cached v2 result for the same commit
+- Railpack build failed or the deploy briefing needs correction
+- you want to iterate on `railpack.json` overrides or `RAILPACK_*` env vars without a full rescan
 
 ## Execution Flow
 
-1. The API loads the cached analysis row from Supabase.
-2. The feedback coordinator reads the user feedback, prior risks, and prior hadolint results.
-3. The coordinator emits a per-artifact improvement plan with `should_change` decisions and instructions.
-4. Artifact improver nodes update Dockerfile, compose, and nginx output only where needed.
-5. The feedback verifier re-runs linting, risk filtering, and confidence scoring.
-6. The improved result is returned and upserted back into the cache.
+1. The API loads the cached analysis row from Supabase (`repo_url + commit_sha + package_path`).
+2. The repo is re-cloned at the cached commit.
+3. `railpack_build_repair` runs with the user feedback injected into the repair LLM prompt.
+4. The AI may patch `railpack.json` or env overrides and retry the build (max 3 attempts per deploy unit).
+5. `finalize` assembles the updated v2 response and upserts the cache.
+
+```mermaid
+graph LR
+  Cache["Load cache"] --> Clone["clone_repo"]
+  Clone --> Repair["railpack_build_repair"]
+  Repair --> Finalize["finalize"]
+```
 
 ## Inputs
 
@@ -25,50 +31,34 @@ Use `POST /feedback` or `POST /feedback/stream` when:
 - `commit_sha`
 - `package_path` (optional, defaults to `.`)
 - `feedback`
-- `github_token` (accepted by the request model, though the workflow primarily operates on cached content)
+- `github_token` (optional, for private repos on re-clone)
 
 ## Outputs
 
-The response matches the main analysis shape and includes:
+The response matches the v2 `/analyze` shape:
 
-- `dockerfiles`
-- `docker_compose`
-- `nginx_conf`
-- `risks`
-- `confidence`
-- `hadolint_results`
-- `commands`
-- `stack_summary`
-- `stack_tokens`
-- `services`
+- `deploy_units[].artifacts.railpack_plan`
+- `deploy_briefing`
+- `repair_history`
+- `build_status`
+- `pipeline_trace`
 
 ## Streaming Behavior
 
 `POST /feedback/stream` emits SSE events with:
 
-- `progress` for each feedback node
+- `progress` for each feedback node (`clone_repo`, `railpack_build_repair`, `finalize`)
 - `complete` with the final payload
 - `error` if cache lookup or remediation fails
 
-Typical node names are:
-
-- `feedback_coordinator`
-- `dockerfile_improver`
-- `compose_improver`
-- `nginx_improver`
-- `feedback_verifier`
-
 ## Failure Handling
 
-- All LLM-backed nodes use the shared retry wrapper with exponential backoff and jitter.
-- Structured-output and validation failures are retried.
-- Timeout budgets limit per-node runtime.
-- If coordinator planning fails, the workflow falls back to a permissive plan so remediation can still proceed.
-- If the cache row does not exist, the feedback endpoints fail instead of running a fresh analysis.
+- LLM-backed repair uses the shared retry wrapper with exponential backoff and jitter.
+- If the cache row does not exist, feedback endpoints fail instead of running a fresh analysis.
+- If Railpack CLI or BuildKit is unavailable, build verification is marked skipped or failed accordingly.
 
 ## Practical Guidance
 
-- Keep feedback concrete and deployment-specific.
-- Mention service names, ports, routes, startup commands, and health checks when possible.
-- Use streaming mode if you want progress visibility in a dashboard or CLI.
-- Treat feedback as iterative artifact repair, not as a substitute for a missing initial `/analyze` run.
+- Reference deploy unit names, ports, and failing build log lines in your feedback.
+- Use streaming mode for dashboard or CLI progress visibility.
+- Run `/analyze` first; feedback is iterative repair on an existing cached result.

@@ -1,24 +1,28 @@
-from fastapi import FastAPI, HTTPException, Header, Depends
-from fastapi.responses import StreamingResponse
+from __future__ import annotations
+
 import json
-from pydantic import BaseModel, Field
-from typing import Optional, List, Dict
-from uuid import uuid4
-from graph.graph import graph, is_build_verify_enabled
-from graph.nodes.llm_config import TokenTracker
-from fastapi.middleware.cors import CORSMiddleware
 import os
-from tools.example_bank import (
-    POPULAR_EXAMPLE_REPOS,
-    seed_example_bank_from_repos,
-    fetch_reference_examples,
+import time
+from typing import Any, Dict, List, Optional
+from uuid import uuid4
+
+from fastapi import Depends, FastAPI, Header, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import StreamingResponse
+from pydantic import BaseModel, Field
+
+from graph.graph import graph
+from graph.nodes.llm_config import TokenTracker
+from models.schemas import (
+    AnalyzeResponse,
+    BuildVerification,
+    DeployUnit,
+    PipelineTraceEntry,
+    RepairAttempt,
+    SCHEMA_VERSION,
+    TokenUsage,
 )
-from tools.template_store import (
-    seed_default_templates,
-    list_templates,
-    upsert_template,
-    delete_template,
-)
+from tools.path_utils import normalize_package_path
 
 app = FastAPI(title="SD-Artifacts Repo Analyzer")
 
@@ -30,72 +34,30 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+V2_PROGRESS_NODES = [
+    "scanner",
+    "clone_repo",
+    "classifier",
+    "railpack_prepare",
+    "deploy_briefing",
+    "railpack_build_repair",
+    "finalize",
+]
+
+
 class AnalyzeRequest(BaseModel):
     repo_url: str
     github_token: Optional[str] = None
     max_files: Optional[int] = 50
     package_path: str = "."
-    service_name: Optional[str] = None
-    # If provided, the API can return a cached response without authentication.
-    # Without this, requests must be authenticated because the app may need to hit GitHub/LLMs.
     commit_sha: Optional[str] = None
-
-class TokenUsage(BaseModel):
-    input_tokens: int = 0
-    output_tokens: int = 0
-    total_tokens: int = 0
-
-class AnalyzeResponse(BaseModel):
-    response_id: Optional[str] = None
-    commit_sha: str = "unknown"
-    stack_summary: str
-    stack_tokens: List[str] = Field(default_factory=list)
-    services: List[Dict]
-    dockerfiles: Dict[str, str]
-    docker_compose: Optional[str] = None
-    nginx_conf: Optional[str] = None
-    has_existing_dockerfiles: bool = False
-    has_existing_compose: bool = False
-    risks: List[str]
-    confidence: float
-    hadolint_results: Dict[str, str] = {}
-    commands: Dict = Field(default_factory=dict)
-    build_verification: Dict = Field(default_factory=dict)
-    llm_outputs: Dict = Field(default_factory=dict)
-    token_usage: TokenUsage = TokenUsage()
-
-
-class SeedExampleBankRequest(BaseModel):
-    repo_urls: List[str]
-    github_token: Optional[str] = None
-    max_files_per_repo: int = 20
-    permissive_only: bool = True
-
-
-class SeedExampleBankResponse(BaseModel):
-    inserted: int
-    updated: int
-    skipped: int
-    errors: List[str] = []
-
-
-class PreviewExamplesRequest(BaseModel):
-    artifact_type: str
-    detected_stack: str
-    stack_tokens: List[str] = Field(default_factory=list)
-    service: Optional[Dict[str, str]] = None
-    limit: int = 3
-
-
-class PreviewExamplesResponse(BaseModel):
-    examples: List[Dict]
+    refresh: bool = False
 
 
 class DeleteCacheRequest(BaseModel):
     repo_url: str
     commit_sha: Optional[str] = None
     package_path: str = "."
-    service_name: Optional[str] = None
 
 
 class DeleteCacheResponse(BaseModel):
@@ -103,7 +65,6 @@ class DeleteCacheResponse(BaseModel):
     repo_url: str
     commit_sha: Optional[str] = None
     package_path: Optional[str] = None
-    service_name: Optional[str] = None
 
 
 class FeedbackRequest(BaseModel):
@@ -125,27 +86,70 @@ class ResponseStatusResponse(BaseModel):
     cache_deleted: int = 0
 
 
-class TemplateRequest(BaseModel):
-    name: str
-    description: str = ""
-    match_stack_tokens: List[str] = Field(default_factory=list)
-    match_signals: Dict = Field(default_factory=dict)
-    priority: int = 0
-    template_content: str = ""
-    variables: Dict = Field(default_factory=dict)
-    is_active: bool = True
-
-
-class TemplateSeedResponse(BaseModel):
-    inserted: int = 0
-    updated: int = 0
-    skipped: int = 0
-
-
 class HealthResponse(BaseModel):
     status: str
     scope: str
     supabase_configured: bool
+
+
+def build_analyze_response(
+    state: Dict[str, Any],
+    response_id: str,
+    token_usage: TokenUsage | Dict[str, Any],
+) -> AnalyzeResponse:
+    if not isinstance(token_usage, TokenUsage):
+        token_usage = TokenUsage(**(token_usage or {}))
+
+    errors: List[str] = list(state.get("errors") or [])
+    if state.get("error"):
+        err = state["error"]
+        if isinstance(err, dict):
+            errors.append(err.get("reason") or json.dumps(err))
+        else:
+            errors.append(str(err))
+
+    deploy_units: List[DeployUnit] = []
+    for unit in state.get("deploy_units") or []:
+        deploy_units.append(DeployUnit(**unit) if isinstance(unit, dict) else unit)
+
+    repair_history: List[RepairAttempt] = []
+    for entry in state.get("repair_history") or []:
+        repair_history.append(RepairAttempt(**entry) if isinstance(entry, dict) else entry)
+
+    pipeline_trace: List[PipelineTraceEntry] = []
+    for entry in state.get("pipeline_trace") or []:
+        pipeline_trace.append(PipelineTraceEntry(**entry) if isinstance(entry, dict) else entry)
+
+    build_verification = state.get("build_verification") or {}
+    if not isinstance(build_verification, BuildVerification):
+        build_verification = BuildVerification(**build_verification)
+
+    return AnalyzeResponse(
+        schema_version=int(state.get("schema_version") or SCHEMA_VERSION),
+        response_id=response_id,
+        commit_sha=state.get("commit_sha", "unknown"),
+        package_path=normalize_package_path(state.get("package_path", ".")),
+        deploy_shape=state.get("deploy_shape", "server"),
+        railpack_version=state.get("railpack_version"),
+        workflow_version=state.get("workflow_version"),
+        build_status=state.get("build_status", "not_run"),
+        deploy_units=deploy_units,
+        deploy_briefing=state.get("deploy_briefing", ""),
+        build_verification=build_verification,
+        repair_history=repair_history,
+        pipeline_trace=pipeline_trace,
+        errors=errors,
+        llm_outputs=state.get("llm_outputs") or {},
+        inputs_snapshot=state.get("inputs_snapshot") or {},
+        token_usage=token_usage,
+    )
+
+
+def _is_v2_cache_result(result: Dict[str, Any]) -> bool:
+    try:
+        return int(result.get("schema_version", 0)) == SCHEMA_VERSION
+    except (TypeError, ValueError):
+        return False
 
 
 def _store_response_log(
@@ -156,101 +160,121 @@ def _store_response_log(
     repo_url: str,
     commit_sha: Optional[str],
     package_path: str,
-    service_name: Optional[str],
     from_cache: bool,
     payload: Dict,
+    schema_version: int = SCHEMA_VERSION,
+    build_status: Optional[str] = None,
+    deploy_shape: Optional[str] = None,
+    railpack_version: Optional[str] = None,
 ) -> None:
     if not supabase:
         return
+    row = {
+        "id": response_id,
+        "endpoint": endpoint,
+        "repo_url": repo_url,
+        "commit_sha": commit_sha,
+        "package_path": package_path or ".",
+        "from_cache": from_cache,
+        "payload": payload,
+        "schema_version": schema_version,
+        "build_status": build_status or payload.get("build_status", "not_run"),
+        "deploy_shape": deploy_shape or payload.get("deploy_shape"),
+        "railpack_version": railpack_version or payload.get("railpack_version"),
+    }
     for attempt in range(3):
         try:
-            supabase.table("analysis_responses").insert(
-                {
-                    "id": response_id,
-                    "endpoint": endpoint,
-                    "repo_url": repo_url,
-                    "commit_sha": commit_sha,
-                    "package_path": package_path or ".",
-                    "service_name": service_name,
-                    "from_cache": from_cache,
-                    "payload": payload,
-                }
-            ).execute()
+            supabase.table("analysis_responses").insert(row).execute()
             break
         except Exception as e:
             print(f"Failed to store analysis response log (attempt {attempt + 1}/3): {e}")
             if attempt < 2:
-                import time
-
                 time.sleep(1)
 
 
-def _fetch_cached_analysis_or_404(repo_url: str, commit_sha: str, package_path: str = "."):
-    from db import supabase
-
-    if not supabase:
-        raise HTTPException(status_code=503, detail="Supabase is not configured")
-
-    try:
-        existing = (
-            supabase.table("analysis_cache")
-            .select("result,response_id")
-            .eq("repo_url", repo_url)
-            .eq("commit_sha", commit_sha)
-            .eq("package_path", package_path)
-            .is_("service_name", None)
-            .single()
-            .execute()
-        )
-    except Exception:
-        raise HTTPException(status_code=404, detail=f"No cached analysis found for {repo_url}@{commit_sha}")
-
-    cached_result = existing.data.get("result") if existing.data else None
-    if not cached_result:
-        raise HTTPException(status_code=404, detail=f"No cached analysis found for {repo_url}@{commit_sha}")
-    response_id = existing.data.get("response_id") if existing.data else None
-    if response_id and isinstance(cached_result, dict):
-        cached_result.setdefault("response_id", response_id)
-
-    return supabase, cached_result
-
-
-def _fetch_cached_analysis_or_404_service_aware(
+def _fetch_cached_analysis(
     repo_url: str,
     commit_sha: str,
     package_path: str = ".",
-    service_name: Optional[str] = None,
 ):
     from db import supabase
 
     if not supabase:
         raise HTTPException(status_code=503, detail="Supabase is not configured")
 
+    normalized_path = normalize_package_path(package_path)
     try:
-        query = (
+        existing = (
             supabase.table("analysis_cache")
             .select("result,response_id")
             .eq("repo_url", repo_url)
             .eq("commit_sha", commit_sha)
-            .eq("package_path", package_path)
+            .eq("package_path", normalized_path)
+            .single()
+            .execute()
         )
-        if service_name:
-            query = query.eq("service_name", service_name)
-        else:
-            query = query.is_("service_name", None)
-
-        existing = query.single().execute()
     except Exception:
-        raise HTTPException(status_code=404, detail=f"No cached analysis found for {repo_url}@{commit_sha}")
+        raise HTTPException(
+            status_code=404,
+            detail=f"No cached v2 analysis found for {repo_url}@{commit_sha}",
+        )
 
     cached_result = existing.data.get("result") if existing.data else None
-    if not cached_result:
-        raise HTTPException(status_code=404, detail=f"No cached analysis found for {repo_url}@{commit_sha}")
+    if not cached_result or not _is_v2_cache_result(cached_result):
+        raise HTTPException(
+            status_code=404,
+            detail=f"No cached v2 analysis found for {repo_url}@{commit_sha}",
+        )
+
     response_id = existing.data.get("response_id") if existing.data else None
     if response_id and isinstance(cached_result, dict):
         cached_result.setdefault("response_id", response_id)
 
     return supabase, cached_result
+
+
+def _cache_insert_row(
+    response: AnalyzeResponse,
+    state: Dict[str, Any],
+    *,
+    repo_url: str,
+    commit_sha: str,
+    package_path: str,
+    response_id: str,
+) -> Dict[str, Any]:
+    result_dict = response.model_dump()
+    return {
+        "response_id": response_id,
+        "repo_url": repo_url,
+        "commit_sha": commit_sha,
+        "package_path": normalize_package_path(package_path),
+        "schema_version": response.schema_version,
+        "build_status": response.build_status,
+        "deploy_shape": response.deploy_shape,
+        "railpack_version": response.railpack_version,
+        "pipeline_duration_ms": state.get("pipeline_duration_ms"),
+        "workflow_version": response.workflow_version,
+        "result": result_dict,
+    }
+
+
+def _save_to_cache(supabase, row: Dict[str, Any], *, replace: bool = False) -> None:
+    if not supabase:
+        return
+    for attempt in range(3):
+        try:
+            if replace:
+                supabase.table("analysis_cache").upsert(
+                    row,
+                    on_conflict="repo_url,commit_sha,package_path",
+                ).execute()
+            else:
+                supabase.table("analysis_cache").insert(row).execute()
+            break
+        except Exception as e:
+            print(f"Failed to cache result in Supabase (attempt {attempt + 1}/3): {e}")
+            if attempt < 2:
+                time.sleep(1)
 
 
 def _require_auth(authorization: Optional[str]) -> None:
@@ -268,51 +292,63 @@ def require_auth(authorization: Optional[str] = Header(default=None)) -> None:
     _require_auth(authorization)
 
 
+def _graph_initial_state(req: AnalyzeRequest) -> Dict[str, Any]:
+    state: Dict[str, Any] = {
+        "repo_url": req.repo_url,
+        "github_token": req.github_token,
+        "max_files": req.max_files,
+        "package_path": req.package_path,
+    }
+    if req.refresh:
+        state["_skip_cache"] = True
+    return state
+
+
+def _handle_graph_error(result: Dict[str, Any]) -> None:
+    if "error" not in result:
+        return
+    err = result["error"]
+    if isinstance(err, dict):
+        raise HTTPException(status_code=400, detail=err)
+    raise HTTPException(status_code=400, detail=str(err))
+
+
 @app.get("/health", response_model=HealthResponse)
 async def health_check():
     from db import supabase
 
-    return HealthResponse(
-        status="ok",
-        scope="public",
-        supabase_configured=bool(supabase),
-    )
+    return HealthResponse(status="ok", scope="public", supabase_configured=bool(supabase))
 
 
 @app.get("/healthz", response_model=HealthResponse, dependencies=[Depends(require_auth)])
 async def health_check_authenticated():
     from db import supabase
 
-    return HealthResponse(
-        status="ok",
-        scope="authenticated",
-        supabase_configured=bool(supabase),
-    )
+    return HealthResponse(status="ok", scope="authenticated", supabase_configured=bool(supabase))
 
 
 @app.post("/analyze", response_model=AnalyzeResponse)
 async def analyze_repo(req: AnalyzeRequest, authorization: Optional[str] = Header(default=None)):
     from db import supabase
+
     _require_auth(authorization)
-    if req.commit_sha:
+    if req.commit_sha and not req.refresh:
         try:
-            _supabase, cached_result = _fetch_cached_analysis_or_404_service_aware(
+            _supabase, cached_result = _fetch_cached_analysis(
                 repo_url=req.repo_url,
                 commit_sha=req.commit_sha,
                 package_path=req.package_path,
-                service_name=req.service_name,
             )
             cached_payload = dict(cached_result)
             cached_payload.setdefault("commit_sha", req.commit_sha)
-            cached_payload.pop("_cache_package_path", None)
+            response_id = cached_payload.get("response_id") or str(uuid4())
             _store_response_log(
                 supabase,
-                response_id=cached_payload.get("response_id") or str(uuid4()),
+                response_id=response_id,
                 endpoint="/analyze",
                 repo_url=req.repo_url,
                 commit_sha=req.commit_sha,
                 package_path=req.package_path,
-                service_name=req.service_name,
                 from_cache=True,
                 payload=cached_payload,
             )
@@ -322,72 +358,33 @@ async def analyze_repo(req: AnalyzeRequest, authorization: Optional[str] = Heade
                 raise
 
     tracker = TokenTracker()
-    
-    initial_state = {
-        "repo_url": req.repo_url,
-        "github_token": req.github_token,
-        "max_files": req.max_files,
-        "package_path": req.package_path,
-        "service_name": req.service_name,
-    }
-    result = graph.invoke(initial_state, config={"callbacks": [tracker]})
-    
-    # Check for errors from scanner or planner
-    if "error" in result:
-        raise HTTPException(status_code=400, detail=result["error"])
-        
+    result = graph.invoke(_graph_initial_state(req), config={"callbacks": [tracker]})
+    _handle_graph_error(result)
+
     if "cached_response" in result:
         cached_payload = dict(result["cached_response"])
         cached_payload.setdefault("commit_sha", result.get("commit_sha", "unknown"))
-        # Do not leak internal cache metadata fields.
-        cached_payload.pop("_cache_package_path", None)
         return AnalyzeResponse(**cached_payload)
-    
+
     commit_sha = result.get("commit_sha", "unknown")
     response_id = str(uuid4())
+    response = build_analyze_response(result, response_id, tracker.get_usage())
 
-    response = AnalyzeResponse(
-        response_id=response_id,
-        commit_sha=commit_sha,
-        stack_summary=result.get("detected_stack", "Unknown"),
-        stack_tokens=result.get("stack_tokens", []),
-        services=result.get("services", []),
-        dockerfiles=result.get("dockerfiles", {}),
-        docker_compose=result.get("docker_compose"),
-        nginx_conf=result.get("nginx_conf"),
-        has_existing_dockerfiles=result.get("has_existing_dockerfiles", False),
-        has_existing_compose=result.get("has_existing_compose", False),
-        risks=result.get("risks", []),
-        confidence=result.get("confidence", 0.0),
-        hadolint_results=result.get("hadolint_results", {}),
-        commands=result.get("commands", {}),
-        build_verification=result.get("build_verification", {}),
-        llm_outputs=result.get("llm_outputs", {}),
-        token_usage=TokenUsage(**tracker.get_usage())
-    )
-    
-    # Save to Supabase cache
     if supabase and commit_sha != "unknown":
-        for attempt in range(3):
-            try:
-                result_dict = response.model_dump() if hasattr(response, 'model_dump') else response.dict()
-                # Internal cache metadata used to support package-scoped cache reuse.
-                result_dict["_cache_package_path"] = req.package_path
-                supabase.table("analysis_cache").insert({
-                    "response_id": response_id,
-                    "repo_url": req.repo_url,
-                    "commit_sha": commit_sha,
-                    "package_path": req.package_path,
-                    "service_name": req.service_name,
-                    "result": result_dict
-                }).execute()
-                break
-            except Exception as e:
-                print(f"Failed to cache result in Supabase (attempt {attempt + 1}/3): {e}")
-                if attempt < 2:
-                    import time
-                    time.sleep(1)
-    response_payload = response.model_dump() if hasattr(response, "model_dump") else response.dict()
+        _save_to_cache(
+            supabase,
+            _cache_insert_row(
+                response,
+                result,
+                repo_url=req.repo_url,
+                commit_sha=commit_sha,
+                package_path=req.package_path,
+                response_id=response_id,
+            ),
+            replace=req.refresh,
+        )
+
+    response_payload = response.model_dump()
     _store_response_log(
         supabase,
         response_id=response_id,
@@ -395,49 +392,13 @@ async def analyze_repo(req: AnalyzeRequest, authorization: Optional[str] = Heade
         repo_url=req.repo_url,
         commit_sha=commit_sha,
         package_path=req.package_path,
-        service_name=req.service_name,
         from_cache=False,
         payload=response_payload,
+        build_status=response.build_status,
+        deploy_shape=response.deploy_shape,
+        railpack_version=response.railpack_version,
     )
-
     return response
-
-
-@app.post("/examples/seed", response_model=SeedExampleBankResponse, dependencies=[Depends(require_auth)])
-async def seed_example_bank(req: SeedExampleBankRequest):
-    result = seed_example_bank_from_repos(
-        repo_urls=req.repo_urls,
-        github_token=req.github_token,
-        max_files_per_repo=req.max_files_per_repo,
-        permissive_only=req.permissive_only,
-    )
-    return SeedExampleBankResponse(**result)
-
-
-@app.post("/examples/seed/popular", response_model=SeedExampleBankResponse, dependencies=[Depends(require_auth)])
-async def seed_example_bank_popular(github_token: Optional[str] = None):
-    result = seed_example_bank_from_repos(
-        repo_urls=POPULAR_EXAMPLE_REPOS,
-        github_token=github_token,
-        max_files_per_repo=20,
-        permissive_only=True,
-    )
-    return SeedExampleBankResponse(**result)
-
-
-@app.post("/examples/preview", response_model=PreviewExamplesResponse, dependencies=[Depends(require_auth)])
-async def preview_example_bank_matches(req: PreviewExamplesRequest):
-    if req.artifact_type not in {"dockerfile", "compose"}:
-        raise HTTPException(status_code=400, detail="artifact_type must be 'dockerfile' or 'compose'")
-
-    examples = fetch_reference_examples(
-        artifact_type=req.artifact_type,
-        detected_stack=req.detected_stack,
-        stack_tokens=req.stack_tokens,
-        service=req.service,
-        limit=req.limit,
-    )
-    return PreviewExamplesResponse(examples=examples)
 
 
 @app.delete("/cache", response_model=DeleteCacheResponse, dependencies=[Depends(require_auth)])
@@ -452,11 +413,7 @@ async def delete_cached_analysis(req: DeleteCacheRequest):
         if req.commit_sha:
             query = query.eq("commit_sha", req.commit_sha)
         if req.package_path:
-            query = query.eq("package_path", req.package_path)
-        if req.service_name:
-            query = query.eq("service_name", req.service_name)
-        else:
-            query = query.is_("service_name", None)
+            query = query.eq("package_path", normalize_package_path(req.package_path))
 
         existing = query.execute()
         rows = existing.data or []
@@ -467,11 +424,7 @@ async def delete_cached_analysis(req: DeleteCacheRequest):
         if req.commit_sha:
             delete_query = delete_query.eq("commit_sha", req.commit_sha)
         if req.package_path:
-            delete_query = delete_query.eq("package_path", req.package_path)
-        if req.service_name:
-            delete_query = delete_query.eq("service_name", req.service_name)
-        else:
-            delete_query = delete_query.is_("service_name", None)
+            delete_query = delete_query.eq("package_path", normalize_package_path(req.package_path))
         delete_query.execute()
 
         return DeleteCacheResponse(
@@ -479,29 +432,24 @@ async def delete_cached_analysis(req: DeleteCacheRequest):
             repo_url=req.repo_url,
             commit_sha=req.commit_sha,
             package_path=req.package_path,
-            service_name=req.service_name,
         )
     except HTTPException:
         raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to delete cache: {e}")
 
+
 @app.post("/analyze/stream")
 async def analyze_repo_stream(req: AnalyzeRequest, authorization: Optional[str] = Header(default=None)):
     from db import supabase
+
     async def cached_event_generator(cached_payload: Dict):
         import asyncio
         import random
-        # Cache hits should still look like a full run to clients.
-        yield f"event: progress\ndata: {json.dumps({'node': 'scanner', 'status': 'completed'})}\n\n"
-        remaining_nodes = ["planner", "commands_gen", "docker_gen", "compose_gen", "nginx_gen", "preflight", "verifier"]
-        if is_build_verify_enabled():
-            remaining_nodes.insert(-2, "build_verify")
-        if not cached_payload.get("docker_compose"):
-            remaining_nodes = [n for n in remaining_nodes if n != "compose_gen"]
+
         total_delay_s = random.uniform(4.0, 10.0)
-        step_delay_s = total_delay_s / max(1, len(remaining_nodes))
-        for node in remaining_nodes:
+        step_delay_s = total_delay_s / max(1, len(V2_PROGRESS_NODES))
+        for node in V2_PROGRESS_NODES:
             await asyncio.sleep(step_delay_s)
             yield f"event: progress\ndata: {json.dumps({'node': node, 'status': 'completed'})}\n\n"
 
@@ -512,7 +460,6 @@ async def analyze_repo_stream(req: AnalyzeRequest, authorization: Optional[str] 
             repo_url=req.repo_url,
             commit_sha=cached_payload.get("commit_sha"),
             package_path=req.package_path,
-            service_name=req.service_name,
             from_cache=True,
             payload=cached_payload,
         )
@@ -521,128 +468,87 @@ async def analyze_repo_stream(req: AnalyzeRequest, authorization: Optional[str] 
     async def live_event_generator():
         import asyncio
         import random
+
         tracker = TokenTracker()
-        
-        initial_state = {
-            "repo_url": req.repo_url,
-            "github_token": req.github_token,
-            "max_files": req.max_files,
-        "package_path": req.package_path,
-        "service_name": req.service_name,
-    }
-        
+        initial_state = _graph_initial_state(req)
+
         try:
-            full_state = {}
+            full_state: Dict[str, Any] = {}
             async for output in graph.astream(initial_state, config={"callbacks": [tracker]}):
                 for node_name, state_update in output.items():
                     full_state.update(state_update)
-                    
-                    # Yield progress event
-                    progress_data = {
-                        "node": node_name,
-                        "status": "completed",
-                    }
-                    yield f"event: progress\ndata: {json.dumps(progress_data)}\n\n"
-                    
+                    yield f"event: progress\ndata: {json.dumps({'node': node_name, 'status': 'completed'})}\n\n"
+
                     if "error" in state_update:
-                        yield f"event: error\ndata: {json.dumps({'detail': state_update['error']})}\n\n"
+                        err = state_update["error"]
+                        detail = err if isinstance(err, (str, dict)) else str(err)
+                        yield f"event: error\ndata: {json.dumps({'detail': detail})}\n\n"
                         return
-                        
+
                     if "cached_response" in state_update:
-                        cached = state_update["cached_response"]
-                        # Inject current token usage into the cached response before returning
+                        cached = dict(state_update["cached_response"])
                         if "token_usage" not in cached:
                             usage = TokenUsage(**tracker.get_usage())
-                            cached["token_usage"] = usage.model_dump() if hasattr(usage, "model_dump") else usage.dict()
-                        cached.setdefault("commit_sha", state_update.get("commit_sha", full_state.get("commit_sha", "unknown")))
+                            cached["token_usage"] = usage.model_dump()
+                        cached.setdefault(
+                            "commit_sha",
+                            state_update.get("commit_sha", full_state.get("commit_sha", "unknown")),
+                        )
 
-                        # Simulate the usual node progression so clients can't infer cache hits.
-                        # Total delay is randomized to look like a real run.
-                        remaining_nodes = ["planner", "commands_gen", "docker_gen", "compose_gen", "nginx_gen", "preflight", "verifier"]
-                        if is_build_verify_enabled():
-                            remaining_nodes.insert(-2, "build_verify")
-                        if not cached.get("docker_compose"):
-                            remaining_nodes = [n for n in remaining_nodes if n != "compose_gen"]
                         total_delay_s = random.uniform(4.0, 10.0)
-                        step_delay_s = total_delay_s / max(1, len(remaining_nodes))
-                        for node in remaining_nodes:
+                        remaining = [n for n in V2_PROGRESS_NODES if n != "scanner"]
+                        step_delay_s = total_delay_s / max(1, len(remaining))
+                        for node in remaining:
                             await asyncio.sleep(step_delay_s)
                             yield f"event: progress\ndata: {json.dumps({'node': node, 'status': 'completed'})}\n\n"
 
-                        cached.pop("_cache_package_path", None)
                         yield f"event: complete\ndata: {json.dumps(cached)}\n\n"
                         return
-            
-            response = AnalyzeResponse(
-                response_id=str(uuid4()),
-                commit_sha=full_state.get("commit_sha", "unknown"),
-                stack_summary=full_state.get("detected_stack", "Unknown"),
-                stack_tokens=full_state.get("stack_tokens", []),
-                services=full_state.get("services", []),
-                dockerfiles=full_state.get("dockerfiles", {}),
-                docker_compose=full_state.get("docker_compose"),
-                nginx_conf=full_state.get("nginx_conf"),
-                has_existing_dockerfiles=full_state.get("has_existing_dockerfiles", False),
-                has_existing_compose=full_state.get("has_existing_compose", False),
-                risks=full_state.get("risks", []),
-                confidence=full_state.get("confidence", 0.0),
-                hadolint_results=full_state.get("hadolint_results", {}),
-                commands=full_state.get("commands", {}),
-                build_verification=full_state.get("build_verification", {}),
-                llm_outputs=full_state.get("llm_outputs", {}),
-                token_usage=TokenUsage(**tracker.get_usage())
-            )
-            
-            # Save to Supabase cache
+
+            response_id = str(uuid4())
+            response = build_analyze_response(full_state, response_id, tracker.get_usage())
             commit_sha = full_state.get("commit_sha", "unknown")
+
             if supabase and commit_sha != "unknown":
-                for attempt in range(3):
-                    try:
-                        result_dict = response.model_dump() if hasattr(response, 'model_dump') else response.dict()
-                        # Internal cache metadata used to support package-scoped cache reuse.
-                        result_dict["_cache_package_path"] = req.package_path
-                        supabase.table("analysis_cache").insert({
-                            "response_id": response.response_id,
-                            "repo_url": req.repo_url,
-                            "commit_sha": commit_sha,
-                            "package_path": req.package_path,
-                            "service_name": req.service_name,
-                            "result": result_dict
-                        }).execute()
-                        break
-                    except Exception as e:
-                        print(f"Failed to cache result in Supabase (attempt {attempt + 1}/3): {e}")
-                        if attempt < 2:
-                            import time
-                            time.sleep(1)
-            
-            final_dict = response.model_dump() if hasattr(response, 'model_dump') else response.dict()
+                _save_to_cache(
+                    supabase,
+                    _cache_insert_row(
+                        response,
+                        full_state,
+                        repo_url=req.repo_url,
+                        commit_sha=commit_sha,
+                        package_path=req.package_path,
+                        response_id=response_id,
+                    ),
+                    replace=req.refresh,
+                )
+
+            final_dict = response.model_dump()
             _store_response_log(
                 supabase,
-                response_id=final_dict.get("response_id") or str(uuid4()),
+                response_id=response_id,
                 endpoint="/analyze/stream",
                 repo_url=req.repo_url,
-                commit_sha=full_state.get("commit_sha"),
+                commit_sha=commit_sha,
                 package_path=req.package_path,
-                service_name=req.service_name,
                 from_cache=False,
                 payload=final_dict,
+                build_status=response.build_status,
+                deploy_shape=response.deploy_shape,
+                railpack_version=response.railpack_version,
             )
             yield f"event: complete\ndata: {json.dumps(final_dict)}\n\n"
-            
+
         except Exception as e:
             yield f"event: error\ndata: {json.dumps({'detail': str(e)})}\n\n"
 
-    # Decide auth vs cache BEFORE starting the streaming response. If we raise after
-    # the stream begins, Starlette can crash with "response already started."
     _require_auth(authorization)
-    if req.commit_sha:
+    if req.commit_sha and not req.refresh:
         try:
-            _supabase, cached_result = _fetch_cached_analysis_or_404_service_aware(
+            _supabase, cached_result = _fetch_cached_analysis(
                 repo_url=req.repo_url,
                 commit_sha=req.commit_sha,
                 package_path=req.package_path,
-                service_name=req.service_name,
             )
             cached_payload = dict(cached_result)
             cached_payload.setdefault("commit_sha", req.commit_sha)
@@ -650,7 +556,6 @@ async def analyze_repo_stream(req: AnalyzeRequest, authorization: Optional[str] 
                 "token_usage",
                 {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0},
             )
-            cached_payload.pop("_cache_package_path", None)
             return StreamingResponse(cached_event_generator(cached_payload), media_type="text/event-stream")
         except HTTPException as e:
             if e.status_code != 404:
@@ -663,153 +568,123 @@ async def analyze_repo_stream(req: AnalyzeRequest, authorization: Optional[str] 
 async def improve_with_feedback(req: FeedbackRequest):
     from graph.feedback import run_feedback_improvement
 
-    # 1. Fetch existing cached analysis
-    supabase, cached_result = _fetch_cached_analysis_or_404(req.repo_url, req.commit_sha, req.package_path)
+    supabase, cached_result = _fetch_cached_analysis(req.repo_url, req.commit_sha, req.package_path)
 
-    # 2. Regenerate artifacts guided by the feedback
     tracker = TokenTracker()
     try:
-        improved = run_feedback_improvement(cached_result, req.feedback)
+        improved_state = run_feedback_improvement(
+            cached_result,
+            req.feedback,
+            repo_url=req.repo_url,
+            github_token=req.github_token,
+            package_path=req.package_path,
+            config={"callbacks": [tracker]},
+        )
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Feedback improvement failed: {e}")
 
-    # 3. Build the response
-    response = AnalyzeResponse(
-        response_id=str(uuid4()),
-        commit_sha=req.commit_sha,
-        stack_summary=improved["stack_summary"],
-        stack_tokens=improved.get("stack_tokens", []),
-        services=improved["services"],
-        dockerfiles=improved["dockerfiles"],
-        docker_compose=improved.get("docker_compose"),
-        nginx_conf=improved.get("nginx_conf"),
-        has_existing_dockerfiles=improved["has_existing_dockerfiles"],
-        has_existing_compose=improved["has_existing_compose"],
-        risks=improved["risks"],
-        confidence=improved["confidence"],
-        hadolint_results=improved["hadolint_results"],
-        commands=improved.get("commands", {}),
-        build_verification=improved.get("build_verification", {}),
-        llm_outputs=improved.get("llm_outputs", {}),
-        token_usage=TokenUsage(**tracker.get_usage()),
-    )
+    response_id = str(uuid4())
+    response = build_analyze_response(improved_state, response_id, tracker.get_usage())
+    result_dict = response.model_dump()
 
-    # 4. Upsert the improved result back to cache
-    result_dict = response.model_dump() if hasattr(response, "model_dump") else response.dict()
-    result_dict["_cache_package_path"] = cached_result.get("_cache_package_path", ".")
     try:
         supabase.table("analysis_cache").upsert(
-            {
-                "response_id": response.response_id,
-                "repo_url": req.repo_url,
-                "commit_sha": req.commit_sha,
-                "package_path": cached_result.get("_cache_package_path", "."),
-                "service_name": None,
-                "result": result_dict,
-            },
-            on_conflict="repo_url,commit_sha,package_path,service_name",
+            _cache_insert_row(
+                response,
+                improved_state,
+                repo_url=req.repo_url,
+                commit_sha=req.commit_sha,
+                package_path=req.package_path,
+                response_id=response_id,
+            ),
+            on_conflict="repo_url,commit_sha,package_path",
         ).execute()
-        print(f"Updated feedback-improved cache for {req.repo_url}@{req.commit_sha}")
     except Exception as e:
         print(f"Failed to update cache after feedback improvement: {e}")
+
     _store_response_log(
         supabase,
-        response_id=response.response_id or str(uuid4()),
+        response_id=response_id,
         endpoint="/feedback",
         repo_url=req.repo_url,
         commit_sha=req.commit_sha,
         package_path=req.package_path,
-        service_name=None,
         from_cache=False,
         payload=result_dict,
+        build_status=response.build_status,
+        deploy_shape=response.deploy_shape,
+        railpack_version=response.railpack_version,
     )
-
     return response
 
 
 @app.post("/feedback/stream", dependencies=[Depends(require_auth)])
 async def improve_with_feedback_stream(req: FeedbackRequest):
     async def event_generator():
-        from graph.feedback import feedback_graph, build_feedback_initial_state, format_feedback_result
+        from graph.feedback import feedback_graph, build_feedback_initial_state
 
         tracker = TokenTracker()
 
         try:
-            supabase, cached_result = _fetch_cached_analysis_or_404(req.repo_url, req.commit_sha, req.package_path)
+            supabase, cached_result = _fetch_cached_analysis(req.repo_url, req.commit_sha, req.package_path)
         except HTTPException as e:
             yield f"event: error\ndata: {json.dumps({'detail': e.detail})}\n\n"
             return
 
-        initial_state = build_feedback_initial_state(cached_result, req.feedback)
+        initial_state = build_feedback_initial_state(
+            cached_result,
+            req.feedback,
+            repo_url=req.repo_url,
+            github_token=req.github_token,
+            package_path=req.package_path,
+        )
 
         try:
             full_state = dict(initial_state)
             async for output in feedback_graph.astream(initial_state, config={"callbacks": [tracker]}):
                 for node_name, state_update in output.items():
                     full_state.update(state_update)
-                    progress_data = {
-                        "node": node_name,
-                        "status": "completed",
-                    }
-                    yield f"event: progress\ndata: {json.dumps(progress_data)}\n\n"
+                    yield f"event: progress\ndata: {json.dumps({'node': node_name, 'status': 'completed'})}\n\n"
 
                     if "error" in state_update:
-                        yield f"event: error\ndata: {json.dumps({'detail': state_update['error']})}\n\n"
+                        err = state_update["error"]
+                        detail = err if isinstance(err, (str, dict)) else str(err)
+                        yield f"event: error\ndata: {json.dumps({'detail': detail})}\n\n"
                         return
 
-            improved = format_feedback_result(full_state)
+            response_id = str(uuid4())
+            response = build_analyze_response(full_state, response_id, tracker.get_usage())
+            result_dict = response.model_dump()
 
-            response = AnalyzeResponse(
-                response_id=str(uuid4()),
-                commit_sha=req.commit_sha,
-                stack_summary=improved["stack_summary"],
-                stack_tokens=improved.get("stack_tokens", []),
-                services=improved["services"],
-                dockerfiles=improved["dockerfiles"],
-                docker_compose=improved.get("docker_compose"),
-                nginx_conf=improved.get("nginx_conf"),
-                has_existing_dockerfiles=improved["has_existing_dockerfiles"],
-                has_existing_compose=improved["has_existing_compose"],
-                risks=improved["risks"],
-                confidence=improved["confidence"],
-                hadolint_results=improved["hadolint_results"],
-                commands=improved.get("commands", {}),
-                build_verification=improved.get("build_verification", {}),
-                llm_outputs=improved.get("llm_outputs", {}),
-                token_usage=TokenUsage(**tracker.get_usage()),
-            )
-
-            result_dict = response.model_dump() if hasattr(response, "model_dump") else response.dict()
-            result_dict["_cache_package_path"] = cached_result.get("_cache_package_path", ".")
             try:
                 supabase.table("analysis_cache").upsert(
-                    {
-                        "response_id": response.response_id,
-                        "repo_url": req.repo_url,
-                        "commit_sha": req.commit_sha,
-                        "package_path": cached_result.get("_cache_package_path", "."),
-                        "service_name": None,
-                        "result": result_dict,
-                    },
-                    on_conflict="repo_url,commit_sha,package_path,service_name",
+                    _cache_insert_row(
+                        response,
+                        full_state,
+                        repo_url=req.repo_url,
+                        commit_sha=req.commit_sha,
+                        package_path=req.package_path,
+                        response_id=response_id,
+                    ),
+                    on_conflict="repo_url,commit_sha,package_path",
                 ).execute()
-                print(f"Updated feedback-improved cache for {req.repo_url}@{req.commit_sha}")
             except Exception as e:
                 print(f"Failed to update cache after feedback improvement: {e}")
 
-            final_dict = response.model_dump() if hasattr(response, "model_dump") else response.dict()
             _store_response_log(
                 supabase,
-                response_id=response.response_id or str(uuid4()),
+                response_id=response_id,
                 endpoint="/feedback/stream",
                 repo_url=req.repo_url,
                 commit_sha=req.commit_sha,
                 package_path=req.package_path,
-                service_name=None,
                 from_cache=False,
-                payload=final_dict,
+                payload=result_dict,
+                build_status=response.build_status,
+                deploy_shape=response.deploy_shape,
+                railpack_version=response.railpack_version,
             )
-            yield f"event: complete\ndata: {json.dumps(final_dict)}\n\n"
+            yield f"event: complete\ndata: {json.dumps(result_dict)}\n\n"
 
         except Exception as e:
             yield f"event: error\ndata: {json.dumps({'detail': str(e)})}\n\n"
@@ -827,7 +702,7 @@ async def set_response_status(req: ResponseStatusRequest):
     try:
         response_row = (
             supabase.table("analysis_responses")
-            .select("id,repo_url,commit_sha,package_path,service_name")
+            .select("id,repo_url,commit_sha,package_path")
             .eq("id", req.response_id)
             .single()
             .execute()
@@ -846,56 +721,20 @@ async def set_response_status(req: ResponseStatusRequest):
 
     deleted = 0
     if req.passed is False:
-        delete_query = (
+        deleted_rows = (
             supabase.table("analysis_cache")
             .delete()
             .eq("repo_url", row.get("repo_url"))
             .eq("commit_sha", row.get("commit_sha"))
-            .eq("package_path", row.get("package_path"))
+            .eq("package_path", normalize_package_path(row.get("package_path")))
+            .execute()
         )
-        if row.get("service_name"):
-            delete_query = delete_query.eq("service_name", row.get("service_name"))
-        else:
-            delete_query = delete_query.is_("service_name", None)
-        deleted_rows = delete_query.execute()
         deleted = len(deleted_rows.data or [])
 
     return ResponseStatusResponse(response_id=req.response_id, passed=req.passed, cache_deleted=deleted)
 
-@app.get("/templates", dependencies=[Depends(require_auth)])
-async def get_templates(active_only: bool = True):
-    templates = list_templates(active_only=active_only)
-    return {"templates": templates}
-
-
-@app.post("/templates", dependencies=[Depends(require_auth)])
-async def create_or_update_template(req: TemplateRequest):
-    try:
-        result = upsert_template(req.model_dump() if hasattr(req, 'model_dump') else req.dict())
-        return result
-    except RuntimeError as e:
-        raise HTTPException(status_code=503, detail=str(e))
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
-
-
-@app.post("/templates/seed", response_model=TemplateSeedResponse, dependencies=[Depends(require_auth)])
-async def seed_templates():
-    result = seed_default_templates()
-    return TemplateSeedResponse(**result)
-
-
-@app.delete("/templates/{name}", dependencies=[Depends(require_auth)])
-async def remove_template(name: str):
-    try:
-        deleted = delete_template(name)
-        if not deleted:
-            raise HTTPException(status_code=404, detail=f"Template '{name}' not found")
-        return {"deleted": True, "name": name}
-    except RuntimeError as e:
-        raise HTTPException(status_code=503, detail=str(e))
-
 
 if __name__ == "__main__":
     import uvicorn
+
     uvicorn.run(app, host="0.0.0.0", port=int(os.getenv("PORT", 8080)))
