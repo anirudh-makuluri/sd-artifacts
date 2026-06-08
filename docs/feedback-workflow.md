@@ -55,6 +55,7 @@ The response matches the v2 `/analyze` shape:
 
 - LLM-backed repair uses the shared retry wrapper with exponential backoff and jitter.
 - If the cache row does not exist, feedback endpoints fail instead of running a fresh analysis.
+- If build verification is disabled for the host environment, feedback re-clones the repo but skips Railpack build repair.
 - If Railpack CLI or BuildKit is unavailable, build verification is marked skipped or failed accordingly.
 
 ## Practical Guidance

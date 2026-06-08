@@ -11,6 +11,7 @@ from graph.llm_retry import invoke_with_retry
 from graph.pipeline_trace import append_trace, trace_node
 from tools.path_utils import normalize_package_path
 from tools.railpack_tools import (
+    env_bool,
     env_int,
     get_railpack_version,
     load_json_file,
@@ -144,6 +145,15 @@ def _aggregate_build_status(unit_results: List[str]) -> str:
     return "not_run"
 
 
+def _build_verification_skip_reason() -> Optional[str]:
+    raw = os.getenv("SD_SKIP_RAILPACK_BUILD")
+    if raw is not None:
+        return "SD_SKIP_RAILPACK_BUILD=true" if env_bool("SD_SKIP_RAILPACK_BUILD", False) else None
+    if env_bool("RENDER", False):
+        return "Render native runtime detected; BuildKit-backed railpack build is disabled"
+    return None
+
+
 def railpack_build_repair_node(state: Dict[str, Any]) -> Dict[str, Any]:
     """Build each deploy unit with up to 3 repair attempts on failure."""
     with trace_node(state, "railpack_build_repair"):
@@ -153,6 +163,25 @@ def railpack_build_repair_node(state: Dict[str, Any]) -> Dict[str, Any]:
         repo_dir = state.get("repo_dir")
         if not repo_dir or not os.path.isdir(repo_dir):
             state["error"] = "Missing repo_dir; cannot run builds."
+            return state
+
+        skip_reason = _build_verification_skip_reason()
+        if skip_reason:
+            state["build_status"] = "skipped"
+            state["build_verification"] = {
+                "backend": "railpack",
+                "status": "skipped",
+                "message": f"Railpack build verification skipped: {skip_reason}.",
+                "attempts": 0,
+                "duration_seconds": 0.0,
+                "log_excerpt": "",
+            }
+            append_trace(
+                state,
+                "railpack_build_repair",
+                "skipped",
+                meta={"reason": skip_reason},
+            )
             return state
 
         units: List[Dict[str, Any]] = state.get("deploy_units") or []
