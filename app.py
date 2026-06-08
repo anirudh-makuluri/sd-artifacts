@@ -23,6 +23,7 @@ from models.schemas import (
     TokenUsage,
 )
 from tools.path_utils import normalize_package_path
+from tools.railpack_tools import get_railpack_version
 
 app = FastAPI(title="SD-Artifacts Repo Analyzer")
 
@@ -90,6 +91,16 @@ class HealthResponse(BaseModel):
     status: str
     scope: str
     supabase_configured: bool
+    railpack_configured: bool
+
+
+def _build_health_response(*, scope: str, supabase: Any) -> HealthResponse:
+    return HealthResponse(
+        status="ok",
+        scope=scope,
+        supabase_configured=bool(supabase),
+        railpack_configured=bool(get_railpack_version()),
+    )
 
 
 def build_analyze_response(
@@ -317,14 +328,14 @@ def _handle_graph_error(result: Dict[str, Any]) -> None:
 async def health_check():
     from db import supabase
 
-    return HealthResponse(status="ok", scope="public", supabase_configured=bool(supabase))
+    return _build_health_response(scope="public", supabase=supabase)
 
 
 @app.get("/healthz", response_model=HealthResponse, dependencies=[Depends(require_auth)])
 async def health_check_authenticated():
     from db import supabase
 
-    return HealthResponse(status="ok", scope="authenticated", supabase_configured=bool(supabase))
+    return _build_health_response(scope="authenticated", supabase=supabase)
 
 
 @app.post("/analyze", response_model=AnalyzeResponse)

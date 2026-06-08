@@ -279,6 +279,7 @@ def test_analyze_returns_400_on_structured_graph_error(monkeypatch):
 def test_health_endpoint_reports_basic_configuration(monkeypatch):
     monkeypatch.setenv("SD_API_BEARER_TOKEN", "test-token")
     monkeypatch.setattr(db_module, "supabase", FakeSupabase())
+    monkeypatch.setattr(app_module, "get_railpack_version", lambda: "0.1.0")
 
     response = _client().get("/health")
 
@@ -287,12 +288,14 @@ def test_health_endpoint_reports_basic_configuration(monkeypatch):
         "status": "ok",
         "scope": "public",
         "supabase_configured": True,
+        "railpack_configured": True,
     }
 
 
 def test_authenticated_health_endpoint_requires_valid_token(monkeypatch):
     _set_auth(monkeypatch)
     monkeypatch.setattr(db_module, "supabase", FakeSupabase())
+    monkeypatch.setattr(app_module, "get_railpack_version", lambda: "0.1.0")
 
     unauthorized = _client().get("/healthz")
     authorized = _client().get("/healthz", headers=_auth_headers())
@@ -303,6 +306,7 @@ def test_authenticated_health_endpoint_requires_valid_token(monkeypatch):
         "status": "ok",
         "scope": "authenticated",
         "supabase_configured": True,
+        "railpack_configured": True,
     }
 
 
