@@ -1,9 +1,13 @@
-from langchain_aws import ChatBedrock
 import os
 import re
 from dotenv import load_dotenv
 from graph.llm_retry import RetryConfig
 from langchain_core.callbacks import BaseCallbackHandler
+
+try:
+    from langchain_aws import ChatBedrock
+except ImportError:  # pragma: no cover - optional for local/unit-test imports
+    ChatBedrock = None
 
 load_dotenv()
 
@@ -17,6 +21,17 @@ _LLM_TEMPERATURES = {
 
 def __getattr__(name: str):
     if name in _LLM_TEMPERATURES:
+        if ChatBedrock is None:
+            class _MissingBedrockClient:
+                def invoke(self, *_args, **_kwargs):
+                    raise RuntimeError("langchain_aws is required for Bedrock-backed generation")
+
+                def with_structured_output(self, *_args, **_kwargs):
+                    return self
+
+            instance = _MissingBedrockClient()
+            globals()[name] = instance
+            return instance
         instance = ChatBedrock(
             model_id=BEDROCK_MODEL_ID,
             model_kwargs={"temperature": _LLM_TEMPERATURES[name], "max_tokens": 4096},

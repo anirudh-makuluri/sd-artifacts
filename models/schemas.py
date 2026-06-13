@@ -21,6 +21,25 @@ class DeployUnitArtifacts(BaseModel):
     railpack_json: Optional[Dict[str, Any]] = None
 
 
+class RemoteBuild(BaseModel):
+    provider: str = "aws_codebuild"
+    backend: str = "railpack"
+    status: str = "not_run"
+    project_name: Optional[str] = None
+    build_id: Optional[str] = None
+    logs_url: Optional[str] = None
+    source_s3_uri: Optional[str] = None
+    result_s3_uri: Optional[str] = None
+    unit_name: str = ""
+    unit_root: str = "."
+    ecr_repository: Optional[str] = None
+    image_tag: Optional[str] = None
+    image_uri: Optional[str] = None
+    image_digest: Optional[str] = None
+    failure_reason: Optional[str] = None
+    log_excerpt: Optional[str] = None
+
+
 class DeployUnit(BaseModel):
     name: str
     root: str
@@ -29,6 +48,7 @@ class DeployUnit(BaseModel):
     framework: Optional[str] = None
     port: int = 8000
     artifacts: DeployUnitArtifacts = Field(default_factory=DeployUnitArtifacts)
+    remote_build: Optional[RemoteBuild] = None
 
 
 class RepairAttempt(BaseModel):
@@ -70,6 +90,7 @@ class AnalyzeResponse(BaseModel):
     workflow_version: Optional[str] = None
     build_status: BuildStatus = "not_run"
     deploy_units: List[DeployUnit] = Field(default_factory=list)
+    remote_builds: Dict[str, RemoteBuild] = Field(default_factory=dict)
     deploy_briefing: str = ""
     build_verification: BuildVerification = Field(default_factory=BuildVerification)
     repair_history: List[RepairAttempt] = Field(default_factory=list)
