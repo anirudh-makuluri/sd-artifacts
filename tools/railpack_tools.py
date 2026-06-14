@@ -125,6 +125,18 @@ def _build_env(env_overrides: Optional[Dict[str, str]]) -> Dict[str, str]:
     return env
 
 
+def _subprocess_output_text(value: Any) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, bytes):
+        return value.decode("utf-8", errors="replace")
+    return str(value)
+
+
+def _combined_subprocess_output(stdout: Any, stderr: Any) -> str:
+    return (_subprocess_output_text(stdout) + "\n" + _subprocess_output_text(stderr)).strip()
+
+
 def run_railpack_prepare(
     unit_dir: str,
     plan_out_path: str,
@@ -153,8 +165,7 @@ def run_railpack_prepare(
         env=_build_env(env_overrides),
         cwd=unit_dir,
     )
-    logs = (result.stdout or "") + "\n" + (result.stderr or "")
-    return result.returncode, logs.strip()
+    return result.returncode, _combined_subprocess_output(result.stdout, result.stderr)
 
 
 def run_railpack_build(
@@ -185,8 +196,7 @@ def run_railpack_build(
             timeout=timeout,
         )
     except subprocess.TimeoutExpired as exc:
-        combined = (exc.stdout or "") + "\n" + (exc.stderr or "")
-        return 124, combined.strip() or f"Railpack build timed out after {timeout}s"
+        combined = _combined_subprocess_output(exc.stdout, exc.stderr)
+        return 124, combined or f"Railpack build timed out after {timeout}s"
 
-    logs = (result.stdout or "") + "\n" + (result.stderr or "")
-    return result.returncode, logs.strip()
+    return result.returncode, _combined_subprocess_output(result.stdout, result.stderr)
