@@ -145,6 +145,7 @@ def build_analyze_response(
         workflow_version=state.get("workflow_version"),
         build_status=state.get("build_status", "not_run"),
         deploy_units=deploy_units,
+        remote_builds=state.get("remote_builds") or {},
         deploy_briefing=state.get("deploy_briefing", ""),
         build_verification=build_verification,
         repair_history=repair_history,
@@ -352,7 +353,8 @@ async def analyze_repo(req: AnalyzeRequest, authorization: Optional[str] = Heade
             )
             cached_payload = dict(cached_result)
             cached_payload.setdefault("commit_sha", req.commit_sha)
-            response_id = cached_payload.get("response_id") or str(uuid4())
+            response_id = str(uuid4())
+            cached_payload["response_id"] = response_id
             _store_response_log(
                 supabase,
                 response_id=response_id,
@@ -375,6 +377,21 @@ async def analyze_repo(req: AnalyzeRequest, authorization: Optional[str] = Heade
     if "cached_response" in result:
         cached_payload = dict(result["cached_response"])
         cached_payload.setdefault("commit_sha", result.get("commit_sha", "unknown"))
+        response_id = str(uuid4())
+        cached_payload["response_id"] = response_id
+        _store_response_log(
+            supabase,
+            response_id=response_id,
+            endpoint="/analyze",
+            repo_url=req.repo_url,
+            commit_sha=cached_payload.get("commit_sha"),
+            package_path=req.package_path,
+            from_cache=True,
+            payload=cached_payload,
+            build_status=cached_payload.get("build_status"),
+            deploy_shape=cached_payload.get("deploy_shape"),
+            railpack_version=cached_payload.get("railpack_version"),
+        )
         return AnalyzeResponse(**cached_payload)
 
     commit_sha = result.get("commit_sha", "unknown")
@@ -505,6 +522,8 @@ async def analyze_repo_stream(req: AnalyzeRequest, authorization: Optional[str] 
                             "commit_sha",
                             state_update.get("commit_sha", full_state.get("commit_sha", "unknown")),
                         )
+                        response_id = str(uuid4())
+                        cached["response_id"] = response_id
 
                         total_delay_s = random.uniform(4.0, 10.0)
                         remaining = [n for n in V2_PROGRESS_NODES if n != "scanner"]
@@ -513,6 +532,19 @@ async def analyze_repo_stream(req: AnalyzeRequest, authorization: Optional[str] 
                             await asyncio.sleep(step_delay_s)
                             yield f"event: progress\ndata: {json.dumps({'node': node, 'status': 'completed'})}\n\n"
 
+                        _store_response_log(
+                            supabase,
+                            response_id=response_id,
+                            endpoint="/analyze/stream",
+                            repo_url=req.repo_url,
+                            commit_sha=cached.get("commit_sha"),
+                            package_path=req.package_path,
+                            from_cache=True,
+                            payload=cached,
+                            build_status=cached.get("build_status"),
+                            deploy_shape=cached.get("deploy_shape"),
+                            railpack_version=cached.get("railpack_version"),
+                        )
                         yield f"event: complete\ndata: {json.dumps(cached)}\n\n"
                         return
 
@@ -563,6 +595,8 @@ async def analyze_repo_stream(req: AnalyzeRequest, authorization: Optional[str] 
             )
             cached_payload = dict(cached_result)
             cached_payload.setdefault("commit_sha", req.commit_sha)
+            response_id = str(uuid4())
+            cached_payload["response_id"] = response_id
             cached_payload.setdefault(
                 "token_usage",
                 {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0},

@@ -19,6 +19,7 @@ from tools.railpack_tools import (
     run_railpack_build,
     run_railpack_prepare,
 )
+from tools.remote_builds import remote_builds_enabled, run_remote_railpack_builds
 from tools.workspace_context import resolve_railpack_target, target_to_meta
 
 
@@ -164,6 +165,16 @@ def railpack_build_repair_node(state: Dict[str, Any]) -> Dict[str, Any]:
         if not repo_dir or not os.path.isdir(repo_dir):
             state["error"] = "Missing repo_dir; cannot run builds."
             return state
+
+        if remote_builds_enabled():
+            out = run_remote_railpack_builds(state)
+            append_trace(
+                out,
+                "railpack_build_repair",
+                out.get("build_status", "not_run"),
+                meta={"backend": "aws_codebuild_railpack"},
+            )
+            return out
 
         skip_reason = _build_verification_skip_reason()
         if skip_reason:

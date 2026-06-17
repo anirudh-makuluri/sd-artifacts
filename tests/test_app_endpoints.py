@@ -397,6 +397,51 @@ def test_analyze_success_caches_result(monkeypatch):
     assert fake_supabase.response_log_payloads[0]["endpoint"] == "/analyze"
 
 
+def test_analyze_success_includes_remote_build_metadata(monkeypatch):
+    _set_auth(monkeypatch)
+    _set_common_mocks(monkeypatch)
+    remote_build = {
+        "provider": "aws_codebuild",
+        "backend": "railpack",
+        "status": "SUCCEEDED",
+        "unit_name": "api",
+        "unit_root": ".",
+        "image_uri": "123456789012.dkr.ecr.us-east-1.amazonaws.com/sd/repo:sha-re",
+        "image_digest": "sha256:abc",
+        "build_id": "project:build",
+        "logs_url": "https://example.com/logs",
+    }
+    fake_supabase = FakeSupabase()
+    monkeypatch.setattr(db_module, "supabase", fake_supabase)
+    monkeypatch.setattr(
+        app_module.graph,
+        "invoke",
+        lambda *_args, **_kwargs: _v2_graph_state(
+            commit_sha="sha-remote",
+            remote_builds={"api": remote_build},
+            deploy_units=[
+                {
+                    "name": "api",
+                    "root": ".",
+                    "type": "server",
+                    "framework": "fastapi",
+                    "port": 8000,
+                    "remote_build": remote_build,
+                }
+            ],
+        ),
+    )
+
+    response = _client().post("/analyze", json={"repo_url": "https://github.com/acme/repo"}, headers=_auth_headers())
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["remote_builds"]["api"]["image_digest"] == "sha256:abc"
+    assert payload["deploy_units"][0]["remote_build"]["image_uri"].endswith(":sha-re")
+    assert fake_supabase.inserted_payloads[0]["result"]["remote_builds"]["api"]["build_id"] == "project:build"
+    assert fake_supabase.response_log_payloads[0]["payload"]["remote_builds"]["api"]["status"] == "SUCCEEDED"
+
+
 def test_analyze_cache_insert_retries_until_success(monkeypatch):
     _set_auth(monkeypatch)
     _set_common_mocks(monkeypatch)

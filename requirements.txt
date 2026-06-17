@@ -7,3 +7,4 @@ python-dotenv
 langchain_aws
 supabase
 mcp
+boto3
