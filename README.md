@@ -8,7 +8,7 @@ It uses **Railpack** to generate verified build plans, **LangGraph** to orchestr
 
 - Scans public or private GitHub repositories (scoped to `package_path`).
 - Classifies deploy shape: static, Vite/static build, server app, or multi-package workspace.
-- Runs `railpack prepare` → `railpack build` with AI repair loop (max 3 attempts per unit).
+- Runs `railpack prepare` → `railpack build` with AI repair loop (max 3 attempts per unit), or remote CodeBuild verification that pushes images to ECR.
 - Returns verified `railpack_plan` JSON + human-readable `deploy_briefing` for [smart-deploy.xyz](https://smart-deploy.xyz).
 - Caches results in Supabase (`repo_url + commit_sha + package_path`, schema v2).
 - Full audit trail: `pipeline_trace`, `repair_history`, `build_status`.
@@ -71,7 +71,7 @@ Set `"refresh": true` to bypass Supabase cache and re-run the full pipeline (sca
 - GitHub token (private repos / rate limits)
 - Amazon Bedrock credentials
 - Supabase (cache + audit log)
-- **Railpack CLI** + Docker/BuildKit on the host (for build verification)
+- **Railpack CLI** + Docker/BuildKit on the host for local build verification, unless remote CodeBuild builds are enabled
 - `SD_API_BEARER_TOKEN` for API auth
 
 ## Setup

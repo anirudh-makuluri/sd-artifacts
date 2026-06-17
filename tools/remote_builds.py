@@ -19,21 +19,20 @@ except ImportError:  # pragma: no cover - optional unless remote builds are enab
         pass
 
 from tools.path_utils import normalize_package_path
-from tools.railpack_tools import env_int
 
 
 TERMINAL_STATUSES = {"SUCCEEDED", "FAILED", "FAULT", "STOPPED", "TIMED_OUT"}
 ACTIVE_STATUSES = {"IN_PROGRESS", "QUEUED"}
+CODEBUILD_REGION = "us-west-2"
+CODEBUILD_PROJECT_NAME = "smartdeploy-builder"
+CODEBUILD_SOURCE_BUCKET = "smart-deploy-codebuild-bucket"
+CODEBUILD_WAIT_TIMEOUT_SECONDS = 900
+CODEBUILD_POLL_INTERVAL_SECONDS = 10
+CODEBUILD_LOG_EXCERPT_LINES = 80
 
 
 def remote_builds_enabled() -> bool:
-    return all(
-        [
-            os.getenv("SD_CODEBUILD_PROJECT_NAME"),
-            os.getenv("SD_CODEBUILD_SOURCE_BUCKET"),
-            os.getenv("SD_CODEBUILD_ECR_REPOSITORY_PREFIX"),
-        ]
-    )
+    return True
 
 
 def run_remote_railpack_builds(state: Dict[str, Any]) -> Dict[str, Any]:
@@ -99,10 +98,9 @@ def run_remote_railpack_builds(state: Dict[str, Any]) -> Dict[str, Any]:
             }
             return state
 
-        _ensure_ecr_repositories(manifest["units"])
         bundle_id = str(uuid.uuid4())
-        source_key = _s3_key(settings["source_prefix"], state, f"{bundle_id}.zip")
-        result_key = _s3_key(settings["result_prefix"], state, f"{bundle_id}.json")
+        source_key = _s3_key(state, "source", f"{bundle_id}.zip")
+        result_key = _s3_key(state, "results", f"{bundle_id}.json")
         source_s3_uri = f"s3://{settings['source_bucket']}/{source_key}"
         result_s3_uri = f"s3://{settings['source_bucket']}/{result_key}"
 
@@ -137,7 +135,7 @@ def run_remote_railpack_builds(state: Dict[str, Any]) -> Dict[str, Any]:
         state["build_verification"] = {
             "backend": "aws_codebuild_railpack",
             "status": state["build_status"],
-            "message": "Railpack build completed in AWS CodeBuild.",
+            "message": _verification_message(remote_builds.values()),
             "attempts": 1,
             "duration_seconds": round(time.monotonic() - started, 3),
             "log_excerpt": _first_log_excerpt(remote_builds.values()),
@@ -165,21 +163,18 @@ def run_remote_railpack_builds(state: Dict[str, Any]) -> Dict[str, Any]:
 
 def _settings() -> Dict[str, Any]:
     return {
-        "region": os.getenv("AWS_DEFAULT_REGION") or os.getenv("AWS_REGION") or "us-east-1",
-        "project_name": os.getenv("SD_CODEBUILD_PROJECT_NAME", "").strip(),
-        "source_bucket": os.getenv("SD_CODEBUILD_SOURCE_BUCKET", "").strip(),
-        "source_prefix": os.getenv("SD_CODEBUILD_SOURCE_PREFIX", "sd-remote-builds/source").strip().strip("/"),
-        "result_prefix": os.getenv("SD_CODEBUILD_RESULT_PREFIX", "sd-remote-builds/results").strip().strip("/"),
-        "ecr_repository_prefix": os.getenv("SD_CODEBUILD_ECR_REPOSITORY_PREFIX", "").strip().strip("/"),
-        "wait_timeout_seconds": env_int("SD_CODEBUILD_WAIT_TIMEOUT_SECONDS", 900, minimum=30),
-        "poll_interval_seconds": env_int("SD_CODEBUILD_POLL_INTERVAL_SECONDS", 10, minimum=1),
-        "max_log_lines": env_int("SD_CODEBUILD_LOG_EXCERPT_LINES", 80, minimum=10),
+        "region": CODEBUILD_REGION,
+        "project_name": CODEBUILD_PROJECT_NAME,
+        "source_bucket": CODEBUILD_SOURCE_BUCKET,
+        "wait_timeout_seconds": CODEBUILD_WAIT_TIMEOUT_SECONDS,
+        "poll_interval_seconds": CODEBUILD_POLL_INTERVAL_SECONDS,
+        "max_log_lines": CODEBUILD_LOG_EXCERPT_LINES,
     }
 
 
 def _ensure_boto3() -> None:
     if boto3 is None:
-        raise RuntimeError("boto3 is required when SD_CODEBUILD_* remote builds are enabled")
+        raise RuntimeError("boto3 is required for AWS CodeBuild remote builds")
 
 
 def _client(name: str):
@@ -253,10 +248,25 @@ def run(cmd: list[str], *, input_text: str | None = None, capture_output: bool =
     return result.stdout.strip() if capture_output else ''
 
 
+def ensure_repository(repository_name: str, region: str) -> None:
+    describe = subprocess.run(
+        [
+            'aws', 'ecr', 'describe-repositories',
+            '--repository-names', repository_name,
+            '--region', region,
+        ],
+        text=True,
+        capture_output=True,
+    )
+    if describe.returncode == 0:
+        return
+    run(['aws', 'ecr', 'create-repository', '--repository-name', repository_name, '--region', region])
+
+
 def main() -> int:
     manifest = json.loads(Path('.sd-remote-build/manifest.json').read_text(encoding='utf-8'))
     units = manifest.get('units', [])
-    region = os.getenv('AWS_DEFAULT_REGION') or os.getenv('AWS_REGION') or 'us-east-1'
+    region = 'us-west-2'
     registry = os.getenv('SD_REMOTE_BUILD_REGISTRY')
     result_path = Path(os.getenv('SD_REMOTE_BUILD_RESULT_PATH', '.sd-remote-build/remote-build-result.json'))
     if not registry:
@@ -273,6 +283,7 @@ def main() -> int:
         entry['image_digest'] = None
         entry['failure_reason'] = None
         try:
+            ensure_repository(unit['repository_name'], region)
             run(['railpack', 'build', unit['unit_root'], '--name', unit['image_uri']])
             run(['docker', 'push', unit['image_uri']])
             digest = run(
@@ -314,6 +325,15 @@ phases:
   build:
     commands:
       - |
+        if ! command -v railpack >/dev/null 2>&1; then
+          curl -sSL https://railpack.com/install.sh | RAILPACK_VERSION=0.26.1 sh -s -- --bin-dir /usr/local/bin
+        fi
+        railpack --version
+        if ! docker ps --format '{{.Names}}' | grep -qx buildkit; then
+          docker rm -f buildkit >/dev/null 2>&1 || true
+          docker run -d --privileged --name buildkit moby/buildkit:buildx-stable-1
+        fi
+      - |
         if command -v python3 >/dev/null 2>&1; then
           PYTHON_BIN=python3
         else
@@ -334,6 +354,7 @@ def _start_build(*, source_bucket: str, source_key: str, result_s3_uri: str) -> 
             {"name": "SD_REMOTE_BUILD_RESULT_S3_URI", "value": result_s3_uri, "type": "PLAINTEXT"},
             {"name": "SD_REMOTE_BUILD_RESULT_PATH", "value": ".sd-remote-build/remote-build-result.json", "type": "PLAINTEXT"},
             {"name": "SD_REMOTE_BUILD_REGISTRY", "value": _registry_uri(), "type": "PLAINTEXT"},
+            {"name": "BUILDKIT_HOST", "value": "docker-container://buildkit", "type": "PLAINTEXT"},
         ],
     )["build"]
     return build
@@ -345,6 +366,11 @@ def _wait_for_build(build_id: str, timeout_seconds: int, poll_interval_seconds: 
     while str(build.get("buildStatus") or "") in ACTIVE_STATUSES and time.time() < deadline:
         time.sleep(poll_interval_seconds)
         build = _get_build(build_id)
+    if str(build.get("buildStatus") or "") in ACTIVE_STATUSES:
+        timed_out = dict(build)
+        timed_out["buildStatus"] = "TIMED_OUT"
+        timed_out["sdFailureReason"] = f"Timed out waiting for CodeBuild build after {timeout_seconds} seconds."
+        return timed_out
     return build
 
 
@@ -364,8 +390,9 @@ def _finalize(
     status = str(build.get("buildStatus") or "UNKNOWN")
     build_id = str(build.get("id") or "")
     logs_url = _codebuild_logs_url(build)
-    result_map = _read_result_map(result_s3_uri) if status == "SUCCEEDED" else {}
+    result_map = _read_result_map(result_s3_uri)
     log_excerpt = _log_excerpt(build) if status in TERMINAL_STATUSES and status != "SUCCEEDED" else None
+    failure_reason = build.get("sdFailureReason") or status
 
     finalized: Dict[str, Dict[str, Any]] = {}
     for key, meta in defaults.items():
@@ -387,10 +414,19 @@ def _finalize(
                 }
             )
         if entry.get("status") != "SUCCEEDED" and entry.get("status") not in ACTIVE_STATUSES:
-            entry["failure_reason"] = entry.get("failure_reason") or status
+            entry["failure_reason"] = entry.get("failure_reason") or failure_reason
             entry["log_excerpt"] = log_excerpt
         finalized[key] = entry
     return finalized
+
+
+def _verification_message(values: Iterable[Dict[str, Any]]) -> str:
+    statuses = [str(value.get("status") or "") for value in values if isinstance(value, dict)]
+    if any(status == "TIMED_OUT" for status in statuses):
+        return "Timed out waiting for AWS CodeBuild remote build."
+    if any(status == "FAILED" for status in statuses):
+        return "Railpack build finished in AWS CodeBuild with failures."
+    return "Railpack build completed in AWS CodeBuild."
 
 
 def _read_result_map(result_s3_uri: str) -> Dict[str, Dict[str, Any]]:
@@ -512,12 +548,11 @@ def _sanitize_segment(value: str, fallback: str) -> str:
 
 
 def _repository_name(repo_slug: str, package_path: str) -> str:
-    prefix = _settings()["ecr_repository_prefix"]
     package_norm = normalize_package_path(package_path)
-    package_segments = [] if package_norm == "." else package_norm.split("/")
+    package_segments = ["root"] if package_norm == "." else package_norm.split("/")
     pieces = [
         _sanitize_segment(piece, fallback="path")
-        for piece in [prefix, repo_slug, *package_segments]
+        for piece in ["sd", repo_slug, *package_segments]
         if piece and piece.strip("/")
     ]
     return "/".join(pieces)[:256]
@@ -532,11 +567,16 @@ def _image_tag(commit_sha: str) -> str:
     return sha or "unknown"
 
 
-def _s3_key(prefix: str, state: Dict[str, Any], suffix: str) -> str:
-    repo = _repo_slug(str(state.get("repo_url") or "repo"))
-    sha = str(state.get("commit_sha") or "unknown")[:12] or "unknown"
-    package = _sanitize_segment(normalize_package_path(str(state.get("package_path") or ".")).replace("/", "-"), fallback="root")
-    return "/".join(part for part in [prefix, repo, sha, package, suffix] if part)
+def _s3_key(state: Dict[str, Any], kind: str, suffix: str) -> str:
+    repo = _repo_name_slug(str(state.get("repo_url") or "repo"))
+    package_path = normalize_package_path(str(state.get("package_path") or "."))
+    package_segments = ["root"] if package_path == "." else package_path.split("/")
+    safe_package_segments = [
+        _sanitize_segment(segment, fallback="path")
+        for segment in package_segments
+        if segment and segment != "."
+    ]
+    return "/".join(["sd", repo, *safe_package_segments, kind, suffix])
 
 
 def _parse_s3_uri(uri: str) -> tuple[str | None, str | None]:
