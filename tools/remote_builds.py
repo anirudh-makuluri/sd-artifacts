@@ -98,6 +98,8 @@ def run_remote_railpack_builds(state: Dict[str, Any]) -> Dict[str, Any]:
             }
             return state
 
+        _ensure_ecr_repositories(manifest["units"])
+
         bundle_id = str(uuid.uuid4())
         source_key = _s3_key(state, "source", f"{bundle_id}.zip")
         result_key = _s3_key(state, "results", f"{bundle_id}.json")
@@ -248,6 +250,14 @@ def run(cmd: list[str], *, input_text: str | None = None, capture_output: bool =
     return result.stdout.strip() if capture_output else ''
 
 
+def command_failure_reason(exc: subprocess.CalledProcessError) -> str:
+    reason = f\"Command failed ({exc.returncode}): {' '.join(map(str, exc.cmd))}\"
+    stderr = (exc.stderr or '').strip()
+    if stderr:
+        reason = f\"{reason}: {stderr}\"
+    return reason
+
+
 def ensure_repository(repository_name: str, region: str) -> None:
     describe = subprocess.run(
         [
@@ -260,7 +270,45 @@ def ensure_repository(repository_name: str, region: str) -> None:
     )
     if describe.returncode == 0:
         return
-    run(['aws', 'ecr', 'create-repository', '--repository-name', repository_name, '--region', region])
+    if 'RepositoryNotFoundException' not in (describe.stderr or ''):
+        raise subprocess.CalledProcessError(
+            describe.returncode,
+            describe.args,
+            output=describe.stdout,
+            stderr=describe.stderr,
+        )
+
+    create = subprocess.run(
+        ['aws', 'ecr', 'create-repository', '--repository-name', repository_name, '--region', region],
+        text=True,
+        capture_output=True,
+    )
+    if create.returncode == 0:
+        return
+    if 'RepositoryAlreadyExistsException' in (create.stderr or ''):
+        verify = subprocess.run(
+            [
+                'aws', 'ecr', 'describe-repositories',
+                '--repository-names', repository_name,
+                '--region', region,
+            ],
+            text=True,
+            capture_output=True,
+        )
+        if verify.returncode == 0:
+            return
+        raise subprocess.CalledProcessError(
+            verify.returncode,
+            verify.args,
+            output=verify.stdout,
+            stderr=verify.stderr,
+        )
+    raise subprocess.CalledProcessError(
+        create.returncode,
+        create.args,
+        output=create.stdout,
+        stderr=create.stderr,
+    )
 
 
 def main() -> int:
@@ -302,7 +350,7 @@ def main() -> int:
         except subprocess.CalledProcessError as exc:
             failed = True
             entry['status'] = 'FAILED'
-            entry['failure_reason'] = f\"Command failed ({exc.returncode}): {' '.join(map(str, exc.cmd))}\"
+            entry['failure_reason'] = command_failure_reason(exc)
         results[unit['unit_name']] = entry
 
     result_path.parent.mkdir(parents=True, exist_ok=True)

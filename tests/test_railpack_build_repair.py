@@ -1,3 +1,7 @@
+import subprocess
+
+import pytest
+
 from graph.nodes.railpack_build_repair import (
     _build_verification_skip_reason,
     railpack_build_repair_node,
@@ -179,7 +183,67 @@ def test_remote_build_runner_ensures_ecr_repository_before_build():
 
     assert "def ensure_repository" in script
     assert "aws', 'ecr', 'create-repository'" in script
+    assert "RepositoryNotFoundException" in script
+    assert "RepositoryAlreadyExistsException" in script
+    assert "command_failure_reason" in script
     assert "ensure_repository(unit['repository_name'], region)" in script
+
+
+def test_remote_build_runner_tolerates_ecr_create_race(monkeypatch):
+    namespace = {"__name__": "remote_build_runner_test"}
+    exec(remote_builds._runner_script(), namespace)
+    calls = []
+
+    def fake_run(cmd, **_kwargs):
+        calls.append(cmd)
+        if cmd[2] == "describe-repositories" and len(calls) == 1:
+            return subprocess.CompletedProcess(
+                cmd,
+                254,
+                stdout="",
+                stderr="RepositoryNotFoundException: missing",
+            )
+        if cmd[2] == "create-repository":
+            return subprocess.CompletedProcess(
+                cmd,
+                254,
+                stdout="",
+                stderr="RepositoryAlreadyExistsException: already exists",
+            )
+        return subprocess.CompletedProcess(cmd, 0, stdout="{}", stderr="")
+
+    monkeypatch.setattr(namespace["subprocess"], "run", fake_run)
+
+    namespace["ensure_repository"]("sd/repo/root", "us-west-2")
+
+    assert [call[2] for call in calls] == [
+        "describe-repositories",
+        "create-repository",
+        "describe-repositories",
+    ]
+
+
+def test_remote_build_runner_does_not_create_after_ecr_describe_denied(monkeypatch):
+    namespace = {"__name__": "remote_build_runner_test"}
+    exec(remote_builds._runner_script(), namespace)
+    calls = []
+
+    def fake_run(cmd, **_kwargs):
+        calls.append(cmd)
+        return subprocess.CompletedProcess(
+            cmd,
+            254,
+            stdout="",
+            stderr="AccessDeniedException: not authorized",
+        )
+
+    monkeypatch.setattr(namespace["subprocess"], "run", fake_run)
+
+    with pytest.raises(subprocess.CalledProcessError) as excinfo:
+        namespace["ensure_repository"]("sd/repo/root", "us-west-2")
+
+    assert [call[2] for call in calls] == ["describe-repositories"]
+    assert "AccessDeniedException" in excinfo.value.stderr
 
 
 def test_remote_build_buildspec_installs_railpack_when_missing():
