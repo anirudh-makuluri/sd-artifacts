@@ -76,13 +76,7 @@ def run_remote_railpack_builds(state: Dict[str, Any]) -> Dict[str, Any]:
                 unit["remote_build"] = meta
                 continue
             manifest["units"].append(
-                {
-                    "unit_name": meta["unit_name"],
-                    "unit_root": meta["unit_root"],
-                    "repository_name": meta["ecr_repository"],
-                    "image_tag": meta["image_tag"],
-                    "image_uri": meta["image_uri"],
-                }
+                _manifest_unit(repo_dir=repo_dir, unit=unit, meta=meta)
             )
 
         if not manifest["units"]:
@@ -235,6 +229,24 @@ def _build_defaults(*, repo_url: str, commit_sha: str, units: list[dict[str, Any
     return defaults
 
 
+def _manifest_unit(*, repo_dir: str, unit: Dict[str, Any], meta: Dict[str, Any]) -> Dict[str, Any]:
+    target = unit.get("railpack_target") if isinstance(unit.get("railpack_target"), dict) else {}
+    railpack_dir = _repo_relative_path(
+        repo_dir,
+        target.get("railpack_dir") or unit.get("root") or ".",
+    )
+    return {
+        "unit_name": meta["unit_name"],
+        "unit_root": meta["unit_root"],
+        "railpack_dir": railpack_dir,
+        "repository_name": meta["ecr_repository"],
+        "image_tag": meta["image_tag"],
+        "image_uri": meta["image_uri"],
+        "build_cmd": target.get("build_cmd"),
+        "start_cmd": target.get("start_cmd"),
+    }
+
+
 def _runner_script() -> str:
     return """from __future__ import annotations
 
@@ -332,7 +344,13 @@ def main() -> int:
         entry['failure_reason'] = None
         try:
             ensure_repository(unit['repository_name'], region)
-            run(['railpack', 'build', unit['unit_root'], '--name', unit['image_uri']])
+            build_target = unit.get('railpack_dir') or unit['unit_root']
+            build_cmd = ['railpack', 'build', build_target, '--name', unit['image_uri']]
+            if unit.get('build_cmd'):
+                build_cmd.extend(['--build-cmd', unit['build_cmd']])
+            if unit.get('start_cmd'):
+                build_cmd.extend(['--start-cmd', unit['start_cmd']])
+            run(build_cmd)
             run(['docker', 'push', unit['image_uri']])
             digest = run(
                 [
@@ -507,16 +525,61 @@ def _ensure_ecr_repositories(units: list[dict[str, Any]]) -> None:
 def _log_excerpt(build: Dict[str, Any]) -> str | None:
     logs = build.get("logs", {}) if isinstance(build.get("logs"), dict) else {}
     cloudwatch = logs.get("cloudWatchLogs", {}) if isinstance(logs.get("cloudWatchLogs"), dict) else {}
-    group_name = cloudwatch.get("groupName")
-    stream_name = cloudwatch.get("streamName")
+    group_name = logs.get("groupName") or cloudwatch.get("groupName")
+    stream_name = logs.get("streamName") or cloudwatch.get("streamName")
     if not group_name or not stream_name:
-        return None
+        return _phase_context_excerpt(build)
     try:
-        response = _logs_client().get_log_events(logGroupName=group_name, logStreamName=stream_name, startFromHead=True)
-        lines = [str(event.get("message") or "").rstrip() for event in response.get("events", []) if event.get("message")]
-        return "\n".join(lines[-_settings()["max_log_lines"] :]) if lines else None
-    except ClientError:
+        client = _logs_client()
+        token = None
+        lines: list[str] = []
+        for _ in range(20):
+            kwargs = {
+                "logGroupName": group_name,
+                "logStreamName": stream_name,
+                "startFromHead": True,
+            }
+            if token:
+                kwargs["nextToken"] = token
+            response = client.get_log_events(**kwargs)
+            lines.extend(
+                str(event.get("message") or "").rstrip()
+                for event in response.get("events", [])
+                if event.get("message")
+            )
+            next_token = response.get("nextForwardToken")
+            if not next_token or next_token == token:
+                break
+            token = next_token
+        if lines:
+            return "\n".join(lines[-_settings()["max_log_lines"] :])
+    except Exception:
+        pass
+    return _phase_context_excerpt(build)
+
+
+def _phase_context_excerpt(build: Dict[str, Any]) -> str | None:
+    phases = build.get("phases") if isinstance(build.get("phases"), list) else []
+    messages: list[str] = []
+    for phase in phases:
+        if not isinstance(phase, dict):
+            continue
+        phase_type = str(phase.get("phaseType") or "UNKNOWN")
+        phase_status = str(phase.get("phaseStatus") or "")
+        contexts = phase.get("contexts") if isinstance(phase.get("contexts"), list) else []
+        for context in contexts:
+            if not isinstance(context, dict):
+                continue
+            status_code = str(context.get("statusCode") or "").strip()
+            message = str(context.get("message") or "").strip()
+            if not status_code and not message:
+                continue
+            prefix = f"[{phase_type}/{phase_status}]".rstrip("/")
+            detail = f"{status_code}: {message}".strip(": ").strip()
+            messages.append(f"{prefix} {detail}".strip())
+    if not messages:
         return None
+    return "\n".join(messages[-_settings()["max_log_lines"] :])
 
 
 def _codebuild_logs_url(build: Dict[str, Any]) -> str | None:
@@ -632,3 +695,15 @@ def _parse_s3_uri(uri: str) -> tuple[str | None, str | None]:
         return None, None
     bucket, _, key = uri[5:].partition("/")
     return bucket or None, key or None
+
+
+def _repo_relative_path(repo_dir: str, path: Any) -> str:
+    if path is None:
+        return "."
+    value = str(path).strip() or "."
+    if os.path.isabs(value):
+        try:
+            value = os.path.relpath(value, repo_dir)
+        except ValueError:
+            return "."
+    return normalize_package_path(value)

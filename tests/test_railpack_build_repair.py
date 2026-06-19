@@ -152,6 +152,38 @@ def test_remote_build_defaults_include_package_path_for_nested_unit(monkeypatch)
     assert defaults["web"]["image_uri"] == "123456789012.dkr.ecr.us-east-1.amazonaws.com/sd/my-repo/apps/web:123456"
 
 
+def test_remote_build_manifest_uses_workspace_target_commands(tmp_path):
+    repo_dir = str(tmp_path / "repo")
+    defaults = {
+        "web": {
+            "unit_name": "web",
+            "unit_root": "apps/web",
+            "ecr_repository": "sd/my-repo/apps/web",
+            "image_tag": "123456",
+            "image_uri": "123456789012.dkr.ecr.us-east-1.amazonaws.com/sd/my-repo/apps/web:123456",
+        }
+    }
+
+    manifest_unit = remote_builds._manifest_unit(
+        repo_dir=repo_dir,
+        unit={
+            "name": "web",
+            "root": "apps/web",
+            "railpack_target": {
+                "railpack_dir": repo_dir,
+                "build_cmd": "pnpm --filter @hoplio/web run build",
+                "start_cmd": "pnpm --filter @hoplio/web run start",
+            },
+        },
+        meta=defaults["web"],
+    )
+
+    assert manifest_unit["railpack_dir"] == "."
+    assert manifest_unit["unit_root"] == "apps/web"
+    assert manifest_unit["build_cmd"] == "pnpm --filter @hoplio/web run build"
+    assert manifest_unit["start_cmd"] == "pnpm --filter @hoplio/web run start"
+
+
 def test_remote_build_s3_key_uses_fixed_repo_package_layout():
     key = remote_builds._s3_key(
         {
@@ -187,6 +219,9 @@ def test_remote_build_runner_ensures_ecr_repository_before_build():
     assert "RepositoryAlreadyExistsException" in script
     assert "command_failure_reason" in script
     assert "ensure_repository(unit['repository_name'], region)" in script
+    assert "build_target = unit.get('railpack_dir') or unit['unit_root']" in script
+    assert "build_cmd.extend(['--build-cmd', unit['build_cmd']])" in script
+    assert "build_cmd.extend(['--start-cmd', unit['start_cmd']])" in script
 
 
 def test_remote_build_runner_tolerates_ecr_create_race(monkeypatch):
@@ -309,6 +344,66 @@ def test_remote_build_finalize_uses_result_map_when_codebuild_fails(monkeypatch)
     assert finalized["web"]["failure_reason"] == "Command failed (1): railpack build apps/web"
     assert finalized["web"]["log_excerpt"] == "build log tail"
     assert remote_builds._aggregate_status(finalized.values()) == "partial"
+
+
+def test_remote_build_log_excerpt_reads_top_level_cloudwatch_stream(monkeypatch):
+    class FakeLogsClient:
+        def __init__(self):
+            self.calls = []
+
+        def get_log_events(self, **kwargs):
+            self.calls.append(kwargs)
+            token = kwargs.get("nextToken")
+            if token is None:
+                return {
+                    "events": [{"message": "first"}, {"message": "second"}],
+                    "nextForwardToken": "page-2",
+                }
+            return {
+                "events": [{"message": "third"}],
+                "nextForwardToken": "page-2",
+            }
+
+    client = FakeLogsClient()
+    monkeypatch.setattr(remote_builds, "_logs_client", lambda: client)
+    monkeypatch.setattr(remote_builds, "_settings", lambda: {"max_log_lines": 2})
+
+    excerpt = remote_builds._log_excerpt(
+        {
+            "logs": {
+                "groupName": "/aws/codebuild/project",
+                "streamName": "build-stream",
+                "cloudWatchLogs": {"status": "ENABLED", "groupName": "/aws/codebuild/project"},
+            }
+        }
+    )
+
+    assert excerpt == "second\nthird"
+    assert client.calls[0]["logGroupName"] == "/aws/codebuild/project"
+    assert client.calls[0]["logStreamName"] == "build-stream"
+
+
+def test_remote_build_log_excerpt_falls_back_to_phase_context(monkeypatch):
+    monkeypatch.setattr(remote_builds, "_settings", lambda: {"max_log_lines": 5})
+
+    excerpt = remote_builds._log_excerpt(
+        {
+            "phases": [
+                {
+                    "phaseType": "BUILD",
+                    "phaseStatus": "FAILED",
+                    "contexts": [
+                        {
+                            "statusCode": "COMMAND_EXECUTION_ERROR",
+                            "message": "railpack build failed",
+                        }
+                    ],
+                }
+            ]
+        }
+    )
+
+    assert excerpt == "[BUILD/FAILED] COMMAND_EXECUTION_ERROR: railpack build failed"
 
 
 def test_remote_build_wait_marks_client_timeout(monkeypatch):
