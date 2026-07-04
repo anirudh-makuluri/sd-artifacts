@@ -1,6 +1,10 @@
 """Smoke tests for v2 feedback graph (clone_repo -> railpack_build_repair -> finalize)."""
 
-from graph.feedback import build_feedback_initial_state, feedback_graph, run_feedback_improvement
+from graph.feedback import (
+    build_feedback_initial_state,
+    feedback_graph,
+    run_feedback_improvement,
+)
 
 
 def _v2_cached_result(**overrides):

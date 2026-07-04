@@ -1,8 +1,9 @@
 import os
+
 from dotenv import load_dotenv
 
 try:
-    from supabase import create_client, Client
+    from supabase import Client, create_client
 except ImportError:  # pragma: no cover - depends on optional runtime dependency
     create_client = None
     Client = object

@@ -1,11 +1,10 @@
 from __future__ import annotations
 
 import json
-import re
 from typing import Any, Dict, List, Optional, Tuple
 
 from graph.pipeline_trace import append_trace, trace_node
-from tools.path_utils import join_repo_path, normalize_package_path, path_under_package
+from tools.path_utils import normalize_package_path, path_under_package
 
 
 def _rel_to_package(file_path: str, package_path: str) -> Optional[str]:

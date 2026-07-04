@@ -1,6 +1,7 @@
 from graph.graph import graph
 from graph.nodes.llm_config import TokenTracker
 
+
 def test_tracker():
     tracker = TokenTracker()
     initial_state = {
@@ -12,7 +13,7 @@ def test_tracker():
     
     # We will just invoke it, it might fail or succeed, but we only care about tokens
     try:
-        result = graph.invoke(initial_state, config={"callbacks": [tracker]})
+        graph.invoke(initial_state, config={"callbacks": [tracker]})
     except Exception as e:
         print("Graph failed:", e)
         

@@ -9,17 +9,17 @@ from uuid import uuid4
 from fastapi import Depends, FastAPI, Header, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
-from pydantic import BaseModel, Field
+from pydantic import BaseModel
 
 from graph.graph import graph
 from graph.nodes.llm_config import TokenTracker
 from models.schemas import (
+    SCHEMA_VERSION,
     AnalyzeResponse,
     BuildVerification,
     DeployUnit,
     PipelineTraceEntry,
     RepairAttempt,
-    SCHEMA_VERSION,
     TokenUsage,
 )
 from tools.path_utils import normalize_package_path
@@ -666,7 +666,7 @@ async def improve_with_feedback(req: FeedbackRequest):
 @app.post("/feedback/stream", dependencies=[Depends(require_auth)])
 async def improve_with_feedback_stream(req: FeedbackRequest):
     async def event_generator():
-        from graph.feedback import feedback_graph, build_feedback_initial_state
+        from graph.feedback import build_feedback_initial_state, feedback_graph
 
         tracker = TokenTracker()
 

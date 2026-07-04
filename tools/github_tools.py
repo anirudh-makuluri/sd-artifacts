@@ -1,12 +1,11 @@
-from concurrent.futures import ThreadPoolExecutor, as_completed
 import os
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Optional
 
 import requests
 from langchain_core.tools import tool
 from pydantic import BaseModel, Field
-
 
 ROOT_MARKDOWN_FILES = {
     "readme.md",
@@ -279,7 +278,6 @@ def _fetch_text_files_parallel(specs: list[tuple[str, str]], headers: dict, sett
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
         future_to_path = {executor.submit(_fetch_one, path, url): path for path, url in specs}
         for future in as_completed(future_to_path):
-            path = future_to_path[future]
             try:
                 fetched_path, content = future.result()
                 if content is not None:

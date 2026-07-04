@@ -21,7 +21,6 @@ except ImportError:  # pragma: no cover - optional unless remote builds are enab
 from tools.path_utils import normalize_package_path
 from tools.railpack_tools import env_int
 
-
 TERMINAL_STATUSES = {"SUCCEEDED", "FAILED", "FAULT", "STOPPED", "TIMED_OUT"}
 ACTIVE_STATUSES = {"IN_PROGRESS", "QUEUED"}
 CODEBUILD_REGION = "us-west-2"

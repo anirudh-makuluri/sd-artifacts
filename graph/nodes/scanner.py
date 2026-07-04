@@ -1,10 +1,10 @@
-from typing import Dict, Any
 import os
 import time
+from typing import Any, Dict
 
+from db import supabase
 from tools.github_tools import fetch_repo_structure
 from tools.path_utils import normalize_package_path
-from db import supabase
 
 
 def _env_bool(name: str, default: bool) -> bool:

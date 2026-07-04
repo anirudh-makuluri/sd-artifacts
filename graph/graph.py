@@ -1,14 +1,15 @@
-from langgraph.graph import StateGraph, END
-from typing import Dict, Any
+from typing import Any, Dict
+
+from langgraph.graph import END, StateGraph
 
 from .nodes import (
-    scanner_node,
-    clone_repo_node,
     classifier_node,
-    railpack_prepare_node,
+    clone_repo_node,
     deploy_briefing_node,
-    railpack_build_repair_node,
     finalize_node,
+    railpack_build_repair_node,
+    railpack_prepare_node,
+    scanner_node,
 )
 
 workflow = StateGraph(dict)

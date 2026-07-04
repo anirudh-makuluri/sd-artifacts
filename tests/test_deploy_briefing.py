@@ -1,10 +1,10 @@
 import pytest
 
 from graph.nodes.deploy_briefing import (
+    _parse_llm_briefing,
     build_deterministic_briefing,
     deploy_briefing_node,
     validate_briefing_markdown,
-    _parse_llm_briefing,
 )
 
 

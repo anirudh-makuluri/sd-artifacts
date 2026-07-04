@@ -108,7 +108,12 @@ attempt_history:
 
 
 def _invoke_repair_llm(state: Dict[str, Any], prompt: str) -> RailpackRepairPatch:
-    from graph.nodes.llm_config import FALLBACK_PROMPTS, RETRY_CONFIGS, llm_repair, strip_markdown_wrapper
+    from graph.nodes.llm_config import (
+        FALLBACK_PROMPTS,
+        RETRY_CONFIGS,
+        llm_repair,
+        strip_markdown_wrapper,
+    )
 
     def _validate(raw: Any) -> RailpackRepairPatch:
         if isinstance(raw, RailpackRepairPatch):
