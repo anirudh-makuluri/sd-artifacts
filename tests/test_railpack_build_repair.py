@@ -112,13 +112,75 @@ def test_railpack_build_repair_uses_remote_build_when_enabled(monkeypatch, tmp_p
     assert out["deploy_units"][0]["remote_build"]["image_uri"].endswith(":sha-ap")
 
 
+def test_railpack_build_repair_treats_timeout_as_skipped(monkeypatch, tmp_path):
+    monkeypatch.setattr("graph.nodes.railpack_build_repair.remote_builds_enabled", lambda: False)
+    monkeypatch.setattr("graph.nodes.railpack_build_repair.get_railpack_version", lambda: "0.26.1")
+    monkeypatch.setattr(
+        "graph.nodes.railpack_build_repair.resolve_railpack_target",
+        lambda repo_dir, _unit_root: type(
+            "Target",
+            (),
+            {
+                "railpack_dir": repo_dir,
+                "config_dir": repo_dir,
+                "build_cmd": None,
+                "start_cmd": None,
+            },
+        )(),
+    )
+    monkeypatch.setattr(
+        "graph.nodes.railpack_build_repair.target_to_meta",
+        lambda _target: {"railpack_dir": str(tmp_path)},
+    )
+    monkeypatch.setattr(
+        "graph.nodes.railpack_build_repair.run_railpack_prepare",
+        lambda *_args, **_kwargs: (0, ""),
+    )
+    monkeypatch.setattr(
+        "graph.nodes.railpack_build_repair.load_json_file",
+        lambda _path: {"steps": []},
+    )
+    monkeypatch.setattr(
+        "graph.nodes.railpack_build_repair.run_railpack_build",
+        lambda *_args, **_kwargs: (124, "Railpack build timed out after 60s"),
+    )
+
+    state = {
+        "repo_dir": str(tmp_path),
+        "deploy_units": [
+            {
+                "name": "api",
+                "root": ".",
+                "type": "server",
+                "framework": "fastapi",
+                "port": 8000,
+            }
+        ],
+        "repair_history": [],
+        "pipeline_trace": [],
+    }
+
+    out = railpack_build_repair_node(state)
+
+    assert out["build_status"] == "skipped"
+    assert out["build_verification"]["status"] == "skipped"
+    assert "timeout cap" in out["build_verification"]["message"]
+    assert out["build_verification"]["attempts"] == 1
+    assert out["repair_history"] == []
+    assert any(
+        entry.get("node") == "railpack_build_repair" and entry.get("status") == "skipped"
+        for entry in out["pipeline_trace"]
+        if isinstance(entry, dict)
+    )
+
+
 def test_remote_builds_enabled_is_hardcoded():
     assert remote_builds.remote_builds_enabled() is True
     settings = remote_builds._settings()
     assert settings["region"] == "us-west-2"
     assert settings["project_name"] == "smartdeploy-builder"
     assert settings["source_bucket"] == "smart-deploy-codebuild-bucket"
-    assert settings["wait_timeout_seconds"] == 900
+    assert settings["wait_timeout_seconds"] == 60
     assert settings["poll_interval_seconds"] == 10
     assert settings["max_log_lines"] == 80
 
@@ -412,8 +474,24 @@ def test_remote_build_wait_marks_client_timeout(monkeypatch):
         "_get_build",
         lambda _build_id: {"buildStatus": "IN_PROGRESS", "id": "project:build"},
     )
+    stopped = {}
+    monkeypatch.setattr(
+        remote_builds,
+        "_codebuild_client",
+        lambda: type("Client", (), {"stop_build": lambda self, **kwargs: stopped.update(kwargs)})(),
+    )
 
     build = remote_builds._wait_for_build("project:build", timeout_seconds=0, poll_interval_seconds=1)
 
     assert build["buildStatus"] == "TIMED_OUT"
     assert "Timed out waiting for CodeBuild build" in build["sdFailureReason"]
+    assert stopped == {"id": "project:build"}
+
+
+def test_remote_build_aggregate_status_treats_timeout_as_skip():
+    assert remote_builds._aggregate_status(
+        [{"status": "TIMED_OUT"}]
+    ) == "skipped"
+    assert remote_builds._aggregate_status(
+        [{"status": "SUCCEEDED"}, {"status": "TIMED_OUT"}]
+    ) == "partial"

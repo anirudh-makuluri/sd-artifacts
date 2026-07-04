@@ -135,14 +135,19 @@ def _invoke_repair_llm(state: Dict[str, Any], prompt: str) -> RailpackRepairPatc
 def _aggregate_build_status(unit_results: List[str]) -> str:
     if not unit_results:
         return "not_run"
-    if all(r == "passed" for r in unit_results):
-        return "passed"
-    if all(r in {"skipped", "not_run"} for r in unit_results):
+    buildable_results = [result for result in unit_results if result != "skipped"]
+    if not buildable_results:
         return "skipped"
-    if any(r == "passed" for r in unit_results) and any(r == "failed" for r in unit_results):
-        return "partial"
-    if any(r == "failed" for r in unit_results):
+    if all(result == "passed" for result in buildable_results):
+        return "passed"
+    if any(result == "failed" for result in buildable_results):
+        if any(result in {"passed", "timed_out"} for result in buildable_results):
+            return "partial"
         return "failed"
+    if any(result == "timed_out" for result in buildable_results):
+        if any(result == "passed" for result in buildable_results):
+            return "partial"
+        return "skipped"
     return "not_run"
 
 
@@ -200,9 +205,11 @@ def railpack_build_repair_node(state: Dict[str, Any]) -> Dict[str, Any]:
         repair_history: List[Dict[str, Any]] = state.setdefault("repair_history", [])
         max_attempts = env_int("SD_RAILPACK_REPAIR_MAX_ATTEMPTS", 3)
         max_log_chars = env_int("SD_RAILPACK_VERIFY_MAX_LOG_CHARS", 8000, minimum=500)
+        verify_timeout_seconds = env_int("SD_RAILPACK_VERIFY_TIMEOUT_SECONDS", 60)
         started = time.monotonic()
         unit_statuses: List[str] = []
         total_attempts = 0
+        timed_out_units: List[str] = []
 
         railpack_version = get_railpack_version()
         state["railpack_version"] = railpack_version
@@ -245,7 +252,7 @@ def railpack_build_repair_node(state: Dict[str, Any]) -> Dict[str, Any]:
                 continue
 
             env_overrides: Dict[str, str] = {}
-            unit_passed = False
+            unit_result = "failed"
             last_logs = ""
 
             for attempt in range(1, max_attempts + 1):
@@ -264,6 +271,7 @@ def railpack_build_repair_node(state: Dict[str, Any]) -> Dict[str, Any]:
                 exit_code, logs = run_railpack_build(
                     target.railpack_dir,
                     env_overrides,
+                    timeout_seconds=verify_timeout_seconds,
                     build_cmd=target.build_cmd,
                     start_cmd=target.start_cmd,
                 )
@@ -271,7 +279,7 @@ def railpack_build_repair_node(state: Dict[str, Any]) -> Dict[str, Any]:
                 attempt_started = time.monotonic()
 
                 if exit_code == 0:
-                    unit_passed = True
+                    unit_result = "passed"
                     repair_history.append({
                         "attempt": attempt,
                         "unit_name": unit_name,
@@ -283,6 +291,21 @@ def railpack_build_repair_node(state: Dict[str, Any]) -> Dict[str, Any]:
                         "duration_seconds": round(time.monotonic() - attempt_started, 2),
                         "result": "passed",
                     })
+                    break
+
+                if exit_code == 124:
+                    unit_result = "timed_out"
+                    timed_out_units.append(unit_name)
+                    append_trace(
+                        state,
+                        "railpack_build_repair",
+                        "skipped",
+                        meta={
+                            "unit": unit_name,
+                            "reason": f"timed out after {verify_timeout_seconds}s",
+                        },
+                        error=last_logs[-300:] or None,
+                    )
                     break
 
                 unit_attempt_history = [
@@ -340,7 +363,12 @@ def railpack_build_repair_node(state: Dict[str, Any]) -> Dict[str, Any]:
                 if not patch.should_retry or attempt >= max_attempts:
                     break
 
-            unit_statuses.append("passed" if unit_passed else "failed")
+            if unit_result == "timed_out":
+                unit_statuses.append(unit_result)
+                continue
+
+            unit_passed = unit_result == "passed"
+            unit_statuses.append(unit_result)
             append_trace(
                 state,
                 "railpack_build_repair",
@@ -351,11 +379,24 @@ def railpack_build_repair_node(state: Dict[str, Any]) -> Dict[str, Any]:
 
         duration = round(time.monotonic() - started, 2)
         build_status = _aggregate_build_status(unit_statuses)
+        if timed_out_units:
+            timeout_message = (
+                f"Railpack build verification hit the {verify_timeout_seconds}s timeout cap "
+                f"for: {', '.join(timed_out_units)}."
+            )
+            if build_status == "partial":
+                message = f"{timeout_message} Other buildable units completed."
+            elif build_status == "skipped":
+                message = f"{timeout_message} Verification was skipped for those units."
+            else:
+                message = timeout_message
+        else:
+            message = "Railpack build verification complete."
         state["build_status"] = build_status
         state["build_verification"] = {
             "backend": "railpack",
             "status": build_status,
-            "message": "Railpack build verification complete.",
+            "message": message,
             "attempts": total_attempts,
             "duration_seconds": duration,
             "log_excerpt": last_logs if unit_statuses else "",

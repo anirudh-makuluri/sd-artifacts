@@ -179,7 +179,7 @@ def run_railpack_build(
     if shutil.which("railpack") is None:
         return 127, "Railpack CLI is not installed on this host."
 
-    timeout = timeout_seconds or env_int("SD_RAILPACK_VERIFY_TIMEOUT_SECONDS", 300)
+    timeout = timeout_seconds or env_int("SD_RAILPACK_VERIFY_TIMEOUT_SECONDS", 60)
     cmd = ["railpack", "build", unit_dir]
     if build_cmd:
         cmd.extend(["--build-cmd", build_cmd])

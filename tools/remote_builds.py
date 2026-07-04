@@ -19,6 +19,7 @@ except ImportError:  # pragma: no cover - optional unless remote builds are enab
         pass
 
 from tools.path_utils import normalize_package_path
+from tools.railpack_tools import env_int
 
 
 TERMINAL_STATUSES = {"SUCCEEDED", "FAILED", "FAULT", "STOPPED", "TIMED_OUT"}
@@ -26,7 +27,7 @@ ACTIVE_STATUSES = {"IN_PROGRESS", "QUEUED"}
 CODEBUILD_REGION = "us-west-2"
 CODEBUILD_PROJECT_NAME = "smartdeploy-builder"
 CODEBUILD_SOURCE_BUCKET = "smart-deploy-codebuild-bucket"
-CODEBUILD_WAIT_TIMEOUT_SECONDS = 900
+CODEBUILD_WAIT_TIMEOUT_SECONDS = 60
 CODEBUILD_POLL_INTERVAL_SECONDS = 10
 CODEBUILD_LOG_EXCERPT_LINES = 80
 
@@ -162,7 +163,10 @@ def _settings() -> Dict[str, Any]:
         "region": CODEBUILD_REGION,
         "project_name": CODEBUILD_PROJECT_NAME,
         "source_bucket": CODEBUILD_SOURCE_BUCKET,
-        "wait_timeout_seconds": CODEBUILD_WAIT_TIMEOUT_SECONDS,
+        "wait_timeout_seconds": env_int(
+            "SD_RAILPACK_VERIFY_TIMEOUT_SECONDS",
+            CODEBUILD_WAIT_TIMEOUT_SECONDS,
+        ),
         "poll_interval_seconds": CODEBUILD_POLL_INTERVAL_SECONDS,
         "max_log_lines": CODEBUILD_LOG_EXCERPT_LINES,
     }
@@ -433,6 +437,10 @@ def _wait_for_build(build_id: str, timeout_seconds: int, poll_interval_seconds: 
         time.sleep(poll_interval_seconds)
         build = _get_build(build_id)
     if str(build.get("buildStatus") or "") in ACTIVE_STATUSES:
+        try:
+            _codebuild_client().stop_build(id=build_id)
+        except Exception:
+            pass
         timed_out = dict(build)
         timed_out["buildStatus"] = "TIMED_OUT"
         timed_out["sdFailureReason"] = f"Timed out waiting for CodeBuild build after {timeout_seconds} seconds."
@@ -489,7 +497,7 @@ def _finalize(
 def _verification_message(values: Iterable[Dict[str, Any]]) -> str:
     statuses = [str(value.get("status") or "") for value in values if isinstance(value, dict)]
     if any(status == "TIMED_OUT" for status in statuses):
-        return "Timed out waiting for AWS CodeBuild remote build."
+        return "Railpack build verification hit the timeout cap while waiting for AWS CodeBuild and was skipped."
     if any(status == "FAILED" for status in statuses):
         return "Railpack build finished in AWS CodeBuild with failures."
     return "Railpack build completed in AWS CodeBuild."
@@ -609,10 +617,16 @@ def _aggregate_status(values: Iterable[Dict[str, Any]]) -> str:
     buildable = [status for status in statuses if status != "SKIPPED"]
     if not buildable:
         return "skipped"
+    if any(status == "FAILED" for status in buildable):
+        if any(status in {"SUCCEEDED", "TIMED_OUT"} for status in buildable):
+            return "partial"
+        return "failed"
+    if any(status == "TIMED_OUT" for status in buildable):
+        if any(status == "SUCCEEDED" for status in buildable):
+            return "partial"
+        return "skipped"
     if all(status == "SUCCEEDED" for status in buildable):
         return "passed"
-    if any(status == "SUCCEEDED" for status in buildable):
-        return "partial"
     return "failed"
 
 

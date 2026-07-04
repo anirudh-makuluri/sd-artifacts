@@ -37,3 +37,20 @@ def test_run_railpack_build_returns_timeout_message_without_output(monkeypatch, 
 
     assert exit_code == 124
     assert logs == "Railpack build timed out after 7s"
+
+
+def test_run_railpack_build_uses_60_second_default_timeout(monkeypatch, tmp_path):
+    monkeypatch.setattr("tools.railpack_tools.shutil.which", lambda _name: "/usr/bin/railpack")
+    captured = {}
+
+    def fake_run(*_args, **kwargs):
+        captured["timeout"] = kwargs["timeout"]
+        return subprocess.CompletedProcess(kwargs["args"] if "args" in kwargs else _args[0], 0, "", "")
+
+    monkeypatch.setattr("tools.railpack_tools.subprocess.run", fake_run)
+
+    exit_code, logs = run_railpack_build(str(tmp_path))
+
+    assert exit_code == 0
+    assert logs == ""
+    assert captured["timeout"] == 60

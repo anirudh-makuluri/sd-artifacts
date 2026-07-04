@@ -20,7 +20,7 @@ The following v2 nodes run through shared retry logic:
 
 - Each node has a maximum execution time budget.
 - Time budgets protect API responsiveness and avoid hangs.
-- Railpack build subprocess timeout is controlled separately via `SD_RAILPACK_VERIFY_TIMEOUT_SECONDS`.
+- Railpack build verification timeout is controlled via `SD_RAILPACK_VERIFY_TIMEOUT_SECONDS` (default `60` seconds locally and for remote CodeBuild waiting).
 
 ## Prompt Fallback
 
