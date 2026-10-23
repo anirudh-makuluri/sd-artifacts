@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import time
@@ -22,6 +23,7 @@ from models.schemas import (
     RepairAttempt,
     TokenUsage,
 )
+from services.streaming import bounded_analysis_events, stream_timeout_seconds
 from tools.path_utils import normalize_package_path
 from tools.railpack_tools import get_railpack_version
 
@@ -33,17 +35,8 @@ app.add_middleware(
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
+    expose_headers=["X-Request-ID"],
 )
-
-V2_PROGRESS_NODES = [
-    "scanner",
-    "clone_repo",
-    "classifier",
-    "railpack_prepare",
-    "deploy_briefing",
-    "railpack_build_repair",
-    "finalize",
-]
 
 
 class AnalyzeRequest(BaseModel):
@@ -472,16 +465,8 @@ async def analyze_repo_stream(req: AnalyzeRequest, authorization: Optional[str] 
     from db import supabase
 
     async def cached_event_generator(cached_payload: Dict):
-        import asyncio
-        import random
-
-        total_delay_s = random.uniform(4.0, 10.0)
-        step_delay_s = total_delay_s / max(1, len(V2_PROGRESS_NODES))
-        for node in V2_PROGRESS_NODES:
-            await asyncio.sleep(step_delay_s)
-            yield f"event: progress\ndata: {json.dumps({'node': node, 'status': 'completed'})}\n\n"
-
-        _store_response_log(
+        await asyncio.to_thread(
+            _store_response_log,
             supabase,
             response_id=cached_payload.get("response_id") or str(uuid4()),
             endpoint="/analyze/stream",
@@ -494,9 +479,6 @@ async def analyze_repo_stream(req: AnalyzeRequest, authorization: Optional[str] 
         yield f"event: complete\ndata: {json.dumps(cached_payload)}\n\n"
 
     async def live_event_generator():
-        import asyncio
-        import random
-
         tracker = TokenTracker()
         initial_state = _graph_initial_state(req)
 
@@ -525,14 +507,8 @@ async def analyze_repo_stream(req: AnalyzeRequest, authorization: Optional[str] 
                         response_id = str(uuid4())
                         cached["response_id"] = response_id
 
-                        total_delay_s = random.uniform(4.0, 10.0)
-                        remaining = [n for n in V2_PROGRESS_NODES if n != "scanner"]
-                        step_delay_s = total_delay_s / max(1, len(remaining))
-                        for node in remaining:
-                            await asyncio.sleep(step_delay_s)
-                            yield f"event: progress\ndata: {json.dumps({'node': node, 'status': 'completed'})}\n\n"
-
-                        _store_response_log(
+                        await asyncio.to_thread(
+                            _store_response_log,
                             supabase,
                             response_id=response_id,
                             endpoint="/analyze/stream",
@@ -553,7 +529,8 @@ async def analyze_repo_stream(req: AnalyzeRequest, authorization: Optional[str] 
             commit_sha = full_state.get("commit_sha", "unknown")
 
             if supabase and commit_sha != "unknown":
-                _save_to_cache(
+                await asyncio.to_thread(
+                    _save_to_cache,
                     supabase,
                     _cache_insert_row(
                         response,
@@ -567,7 +544,8 @@ async def analyze_repo_stream(req: AnalyzeRequest, authorization: Optional[str] 
                 )
 
             final_dict = response.model_dump()
-            _store_response_log(
+            await asyncio.to_thread(
+                _store_response_log,
                 supabase,
                 response_id=response_id,
                 endpoint="/analyze/stream",
@@ -585,28 +563,41 @@ async def analyze_repo_stream(req: AnalyzeRequest, authorization: Optional[str] 
         except Exception as e:
             yield f"event: error\ndata: {json.dumps({'detail': str(e)})}\n\n"
 
-    _require_auth(authorization)
-    if req.commit_sha and not req.refresh:
-        try:
-            _supabase, cached_result = _fetch_cached_analysis(
-                repo_url=req.repo_url,
-                commit_sha=req.commit_sha,
-                package_path=req.package_path,
-            )
-            cached_payload = dict(cached_result)
-            cached_payload.setdefault("commit_sha", req.commit_sha)
-            response_id = str(uuid4())
-            cached_payload["response_id"] = response_id
-            cached_payload.setdefault(
-                "token_usage",
-                {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0},
-            )
-            return StreamingResponse(cached_event_generator(cached_payload), media_type="text/event-stream")
-        except HTTPException as e:
-            if e.status_code != 404:
-                raise
+    async def event_generator():
+        if req.commit_sha and not req.refresh:
+            try:
+                _supabase, cached_result = await asyncio.to_thread(
+                    _fetch_cached_analysis,
+                    repo_url=req.repo_url,
+                    commit_sha=req.commit_sha,
+                    package_path=req.package_path,
+                )
+                cached_payload = dict(cached_result)
+                cached_payload.setdefault("commit_sha", req.commit_sha)
+                cached_payload["response_id"] = str(uuid4())
+                cached_payload.setdefault(
+                    "token_usage",
+                    {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0},
+                )
+                async for event in cached_event_generator(cached_payload):
+                    yield event
+                return
+            except HTTPException as e:
+                if e.status_code != 404:
+                    yield f"event: error\ndata: {json.dumps({'detail': e.detail})}\n\n"
+                    return
+        async for event in live_event_generator():
+            yield event
 
-    return StreamingResponse(live_event_generator(), media_type="text/event-stream")
+    _require_auth(authorization)
+    request_id = str(uuid4())
+    return StreamingResponse(
+        bounded_analysis_events(
+            event_generator(), request_id=request_id, timeout_seconds=stream_timeout_seconds(),
+        ),
+        media_type="text/event-stream",
+        headers={"X-Request-ID": request_id, "Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
 
 
 @app.post("/feedback", response_model=AnalyzeResponse, dependencies=[Depends(require_auth)])
