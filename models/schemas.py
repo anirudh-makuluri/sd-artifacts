@@ -46,7 +46,7 @@ class DeployUnit(BaseModel):
     type: str
     provider: str = ""
     framework: Optional[str] = None
-    port: int = 8000
+    port: Optional[int] = None
     artifacts: DeployUnitArtifacts = Field(default_factory=DeployUnitArtifacts)
     remote_build: Optional[RemoteBuild] = None
 

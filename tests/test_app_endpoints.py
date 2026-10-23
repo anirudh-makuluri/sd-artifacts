@@ -824,6 +824,68 @@ def test_analyze_stream_requires_auth_before_starting(monkeypatch):
 
 
 @pytest.mark.parametrize("endpoint", ["/analyze", "/analyze/stream"])
+def test_stale_static_port_cache_is_regenerated_and_replaced(monkeypatch, endpoint):
+    from langgraph.graph import END, StateGraph
+
+    import graph.nodes.scanner as scanner_module
+    from graph.nodes.classifier import classifier_node
+    from graph.nodes.deploy_briefing import deploy_briefing_node
+    from graph.nodes.finalize import finalize_node
+    from graph.nodes.railpack_build_repair import railpack_build_repair_node
+
+    _set_auth(monkeypatch)
+    repo_url = "https://github.com/acme/repo"
+    old = _v2_graph_state(deploy_shape="static_build", deploy_units=[{
+        "name": "web", "root": "apps/web", "type": "static_build", "port": 3000,
+    }], deploy_briefing="# Deploy briefing\n\nExpose port 3000.")
+    supabase = FakeSupabase(cache_rows=[{
+        "id": "cached", "repo_url": repo_url, "commit_sha": "sha-1",
+        "package_path": "apps/web", "result": old,
+    }])
+    monkeypatch.setattr(db_module, "supabase", supabase)
+    monkeypatch.setattr(scanner_module, "supabase", supabase)
+    _install_fake_scanner(monkeypatch, {
+        "commit_sha": "sha-1", "key_files": {
+            "apps/web/package.json": '{"scripts":{"build":"vite build"},"devDependencies":{"vite":"latest"}}',
+        },
+    })
+    prepared = []
+
+    def prepare(state):
+        prepared.append(True)
+        state["deploy_units"][0]["artifacts"]["railpack_plan"] = {"steps": [], "deploy": {}}
+        return state
+
+    raw = "# Deploy briefing\n\n## Overview\n\nStatic app.\n\n## Ports & networking\n\nExpose port 3000."
+    monkeypatch.setattr("graph.nodes.deploy_briefing.invoke_with_retry", lambda **kwargs: (raw, 1, False))
+    workflow = StateGraph(dict)
+    nodes = [
+        ("scanner", scanner_module.scanner_node), ("classifier", classifier_node),
+        ("prepare", prepare), ("briefing", deploy_briefing_node),
+        ("build", railpack_build_repair_node), ("finalize", finalize_node),
+    ]
+    for name, function in nodes:
+        workflow.add_node(name, function)
+    workflow.set_entry_point("scanner")
+    for (name, _function), (following, _next) in zip(nodes, nodes[1:]):
+        workflow.add_edge(name, following)
+    workflow.add_edge("finalize", END)
+    monkeypatch.setattr(app_module, "graph", workflow.compile())
+
+    for _attempt in range(2):
+        response = _client().post(endpoint, json={
+            "repo_url": repo_url, "package_path": "apps/web", "commit_sha": "sha-1",
+        }, headers=_auth_headers())
+        payload = _parse_sse(response.text)[-1][1] if endpoint.endswith("/stream") else response.json()
+        assert payload["deploy_units"][0]["port"] is None
+        assert "3000" not in payload["deploy_briefing"]
+        assert "static host, CDN" in payload["deploy_briefing"]
+    assert prepared == [True]  # The second request reuses the corrected cache row.
+    assert len(supabase.upserted_payloads) == 1
+    assert supabase.cache_rows[0]["result"]["deploy_units"][0]["port"] is None
+
+
+@pytest.mark.parametrize("endpoint", ["/analyze", "/analyze/stream"])
 @pytest.mark.parametrize("verify_build", [False, True])
 def test_analysis_build_verification_is_opt_in(monkeypatch, tmp_path, endpoint, verify_build):
     from langgraph.graph import END, StateGraph

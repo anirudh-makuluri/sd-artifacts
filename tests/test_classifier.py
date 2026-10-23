@@ -1,3 +1,5 @@
+import pytest
+
 from graph.nodes.classifier import (
     _classify_deploy_shape,
     _classify_single_unit,
@@ -33,6 +35,21 @@ def test_classify_single_unit_detects_node_server():
     assert unit["type"] == "server"
     assert unit["framework"] == "express"
     assert unit["name"] == "app"
+    assert unit["port"] == 3000
+
+
+@pytest.mark.parametrize("files", [
+    {"package.json": '{"scripts":{"build":"vite build"},"devDependencies":{"vite":"latest"}}',
+     "vite.config.ts": "export default {server:{port:5173}}"},
+    {"index.html": "<html>Static site</html>"},
+])
+def test_static_units_do_not_invent_a_runtime_port(files):
+    from models.schemas import DeployUnit
+
+    unit = _classify_single_unit({"key_files": files}, ".", ".")
+    assert unit["type"] in {"static", "static_build"}
+    assert unit["port"] is None
+    assert DeployUnit(**unit).model_dump()["port"] is None
 
 
 def test_classifier_node_sets_deploy_units_for_simple_repo():
