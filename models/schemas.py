@@ -72,6 +72,7 @@ class PipelineTraceEntry(BaseModel):
 
 
 class BuildVerification(BaseModel):
+    requested: bool = True
     backend: str = "railpack"
     status: str = "not_run"
     message: str = ""

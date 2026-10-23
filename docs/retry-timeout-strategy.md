@@ -24,6 +24,15 @@ The following v2 nodes run through shared retry logic:
 
 ## Stream deadline and cancellation
 
+API analysis now defaults to `verify_build: false`: return the prepared plan and
+briefing with verification explicitly skipped (`requested: false`), without
+submitting a CodeBuild job or running a local build. This is compatible with the
+current Capora schema, which accepts `skipped` but has no pending-build status.
+The briefing also makes clear that no build was started. This removes remote
+build waiting from the ordinary analysis request rather than merely failing it
+earlier. `verify_build: true` opts back into verification, which can still exceed
+the stream deadline. Plan-only cache entries cannot satisfy that opt-in request.
+
 `POST /analyze/stream` applies one absolute deadline across cache lookup, graph
 execution, cache writes, and response logging. It defaults to 110 seconds and can
 be set with `SD_ANALYZE_STREAM_TIMEOUT_SECONDS` (positive finite seconds; invalid
@@ -31,8 +40,9 @@ values use the default). Progress events do not restart the deadline. This setti
 does not change `/analyze` or `/feedback` timeouts.
 
 Cache hits have no intentional delay. Cold analysis has no guaranteed completion
-time: a briefing alone has a 90-second budget, remote build waiting defaults to
-60 seconds, and scanning, cloning, preparation, retries and persistence add time.
+time: a briefing alone has a 90-second budget; when verification is requested,
+remote build waiting defaults to 60 seconds, and scanning, cloning, preparation,
+retries and persistence add time.
 Increasing only the build timeout cannot make a cold run fit a 120-second client
 deadline. Configure each client's total deadline and proxy limits above the
 service deadline, allowing for queue, connection, and transport overhead.
@@ -68,6 +78,15 @@ Request bodies, GitHub tokens, and raw pipeline outputs are not logged by this
 instrumentation. Use `SD_WORKFLOW_VERSION` (or `GIT_SHA`) to identify deployments.
 
 ### Investigation and verification for issue #6
+
+A direct production retest on 2026-10-23 returned `analysis_timeout` at 110.59
+seconds, with `deploy_briefing` the last completed stage at 44.44 seconds. The
+request ID was `94f02369-7775-447e-a3e7-3fb397ed1c40`. This established that the
+deadline was active but the build-verification stage did not complete in time;
+the stream did not identify the particular AWS operation responsible. The
+default plan-only path addresses that request's need for useful analysis within
+the existing Capora contract. A verified terminal build outcome would require a
+longer-lived client or a separate asynchronous build/status contract.
 
 Code inspection found the missing total stream deadline and artificial 4–10
 second cache delays. The prior 60-second build cap only covers build waiting.

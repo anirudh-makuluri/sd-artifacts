@@ -1,3 +1,5 @@
+import pytest
+
 from graph.nodes.scanner import scanner_node
 
 
@@ -63,6 +65,21 @@ def _base_scan():
         "tree_entry_count": 10,
         "candidate_package_paths": [],
     }
+
+
+@pytest.mark.parametrize("verify_build", [False, True])
+def test_scanner_plan_only_cache_does_not_satisfy_verification(monkeypatch, verify_build):
+    _install_fake_scanner(monkeypatch, _base_scan())
+    import graph.nodes.scanner as scanner_module
+
+    monkeypatch.setattr(scanner_module, "supabase", FakeSupabase([{
+        "repo_url": "https://github.com/acme/repo", "commit_sha": "sha-1", "package_path": ".",
+        "result": {"schema_version": 2, "build_status": "skipped", "build_verification": {"requested": False}},
+    }]))
+    out = scanner_node({
+        "repo_url": "https://github.com/acme/repo", "package_path": ".", "verify_build": verify_build,
+    })
+    assert ("cached_response" in out) is (not verify_build)
 
 
 def test_scanner_cache_hit_requires_schema_version_2(monkeypatch):
