@@ -50,7 +50,7 @@ def test_mixed_briefing_labels_server_port_as_a_default():
 
 
 def test_llm_networking_section_is_grounded_in_plan_metadata(monkeypatch):
-    raw = "# Deploy briefing\n\n## Overview\n\nStatic app.\n\n## Ports & networking\n\nExpose port 3000.\n\n## Environment variables\n\nConfigure build variables."
+    raw = "# Deploy briefing\n\n## Overview\n\nStatic app.\n\n## Build & run\n\nBuild assets.\n\n## Ports & networking\n\nExpose port 3000.\n\n## Environment variables\n\nConfigure build variables.\n\n## Risks & caveats\n\nVerify the build."
     monkeypatch.setattr("graph.nodes.deploy_briefing.invoke_with_retry", lambda **kwargs: (raw, 1, False))
     out = deploy_briefing_node(_static_state())
     assert "3000" not in out["deploy_briefing"]
@@ -58,6 +58,42 @@ def test_llm_networking_section_is_grounded_in_plan_metadata(monkeypatch):
     assert "static host, CDN" in out["deploy_briefing"]
     assert "## Environment variables" in out["deploy_briefing"]
     assert out["llm_outputs"]["briefing"]["source"] == "llm"
+
+
+@pytest.mark.parametrize("wrapper", [None, "markdown", ""])
+def test_parser_preserves_complete_document_with_internal_command_fences(wrapper):
+    document = (
+        "# Deploy briefing\n\n## Overview\n\nStatic site.\n\n## Build & run\n\n"
+        "```\npnpm install --frozen-lockfile --prefer-offline\n```\n\n"
+        "```sh\npnpm --filter @capora/web run build\n```\n\n"
+        "## Ports & networking\n\nUse static hosting.\n\n"
+        "## Environment variables\n\nSet build variables.\n\n"
+        "## Risks & caveats\n\nBuild verification was skipped."
+    )
+    raw = document if wrapper is None else f"```{wrapper}\n{document}\n```"
+    assert _parse_llm_briefing(raw) == document
+
+
+def test_parser_removes_preamble_without_extracting_internal_code():
+    document = "# Deploy briefing\n\n## Overview\n\nA deployment document with build instructions.\n\n## Build & run\n\n```\npnpm run build\n```\n\nKeep the rest of the document."
+    assert _parse_llm_briefing("Here is the briefing:\n```markdown\n" + document + "\n```") == document
+
+
+def test_incomplete_llm_briefing_uses_complete_plan_based_fallback(monkeypatch):
+    from services.briefing_policy import is_complete_briefing
+
+    state = _static_state()
+    state["deploy_units"][0]["artifacts"]["railpack_plan"]["steps"] = [{
+        "name": "build", "commands": [{"cmd": "pnpm --filter @capora/web run build"}],
+    }]
+    monkeypatch.setattr("graph.nodes.deploy_briefing.invoke_with_retry", lambda **kwargs: (
+        "# Deploy briefing\n\npnpm install --frozen-lockfile", 1, False,
+    ))
+    out = deploy_briefing_node(state)
+    assert is_complete_briefing(out["deploy_briefing"])
+    assert "pnpm --filter @capora/web run build" in out["deploy_briefing"]
+    assert out["llm_outputs"]["briefing"] == {"source": "deterministic"}
+    assert not out.get("errors")
 
 
 def test_deploy_briefing_unpacks_invoke_with_retry_tuple(monkeypatch):

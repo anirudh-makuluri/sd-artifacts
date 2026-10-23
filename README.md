@@ -66,6 +66,9 @@ a production listening port. The networking section describes static hosting and
 any serving command actually present in the plan. Server-unit classifier ports
 are labelled as default suggestions that need runtime confirmation. Cache entries
 with the older guessed static ports are regenerated and replaced automatically.
+Internal command code blocks are preserved within the complete briefing. If an
+AI response omits required sections, a complete plan-based briefing replaces it;
+incomplete cached static briefings are regenerated too.
 
 ### POST /analyze/stream
 

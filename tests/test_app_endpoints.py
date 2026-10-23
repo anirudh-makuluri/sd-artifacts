@@ -824,7 +824,8 @@ def test_analyze_stream_requires_auth_before_starting(monkeypatch):
 
 
 @pytest.mark.parametrize("endpoint", ["/analyze", "/analyze/stream"])
-def test_stale_static_port_cache_is_regenerated_and_replaced(monkeypatch, endpoint):
+@pytest.mark.parametrize("stale_port", [3000, None])
+def test_stale_static_port_cache_is_regenerated_and_replaced(monkeypatch, endpoint, stale_port):
     from langgraph.graph import END, StateGraph
 
     import graph.nodes.scanner as scanner_module
@@ -836,7 +837,7 @@ def test_stale_static_port_cache_is_regenerated_and_replaced(monkeypatch, endpoi
     _set_auth(monkeypatch)
     repo_url = "https://github.com/acme/repo"
     old = _v2_graph_state(deploy_shape="static_build", deploy_units=[{
-        "name": "web", "root": "apps/web", "type": "static_build", "port": 3000,
+        "name": "web", "root": "apps/web", "type": "static_build", "port": stale_port,
     }], deploy_briefing="# Deploy briefing\n\nExpose port 3000.")
     supabase = FakeSupabase(cache_rows=[{
         "id": "cached", "repo_url": repo_url, "commit_sha": "sha-1",
