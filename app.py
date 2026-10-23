@@ -23,7 +23,7 @@ from models.schemas import (
     RepairAttempt,
     TokenUsage,
 )
-from services.cache_policy import satisfies_build_request
+from services.cache_policy import satisfies_analysis_request
 from services.streaming import bounded_analysis_events, stream_timeout_seconds
 from tools.path_utils import normalize_package_path
 from tools.railpack_tools import get_railpack_version
@@ -231,7 +231,7 @@ def _fetch_cached_analysis(
     cached_result = existing.data.get("result") if existing.data else None
     if (
         not cached_result or not _is_v2_cache_result(cached_result)
-        or not satisfies_build_request(cached_result, verify_build)
+        or not satisfies_analysis_request(cached_result, verify_build)
     ):
         raise HTTPException(
             status_code=404,
@@ -411,7 +411,7 @@ async def analyze_repo(req: AnalyzeRequest, authorization: Optional[str] = Heade
                 package_path=req.package_path,
                 response_id=response_id,
             ),
-            replace=req.refresh or req.verify_build,
+            replace=req.refresh or req.verify_build or bool(result.get("_replace_cache")),
         )
 
     response_payload = response.model_dump()
@@ -549,7 +549,7 @@ async def analyze_repo_stream(req: AnalyzeRequest, authorization: Optional[str] 
                         package_path=req.package_path,
                         response_id=response_id,
                     ),
-                    replace=req.refresh or req.verify_build,
+                    replace=req.refresh or req.verify_build or bool(full_state.get("_replace_cache")),
                 )
 
             final_dict = response.model_dump()

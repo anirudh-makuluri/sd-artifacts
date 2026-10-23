@@ -3,7 +3,7 @@ import time
 from typing import Any, Dict
 
 from db import supabase
-from services.cache_policy import satisfies_build_request
+from services.cache_policy import satisfies_analysis_request
 from tools.github_tools import fetch_repo_structure
 from tools.path_utils import normalize_package_path
 
@@ -98,11 +98,13 @@ def scanner_node(state: Dict[str, Any]) -> Dict[str, Any]:
                         cached = row.get("result", {}) if isinstance(row, dict) else {}
                         if (
                             isinstance(cached, dict) and _is_v2_cache_result(cached)
-                            and satisfies_build_request(cached, state.get("verify_build", True))
+                            and satisfies_analysis_request(cached, state.get("verify_build", True))
                         ):
                             state["cached_response"] = cached
                             state["repo_scan"] = scan
                             return state
+                        if isinstance(cached, dict) and _is_v2_cache_result(cached):
+                            state["_replace_cache"] = True
                 break
             except Exception as e:
                 print(f"Supabase cache read error (attempt {attempt + 1}/3): {e}")

@@ -197,7 +197,7 @@ def _classify_single_unit(
         "type": unit_type,
         "provider": provider,
         "framework": framework,
-        "port": port,
+        "port": None if unit_type in {"static", "static_build"} else port,
         "artifacts": {
             "railpack_plan": None,
             "railpack_json": None,

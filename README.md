@@ -61,6 +61,12 @@ result. Verification can outlast a short client's deadline; callers requiring a
 terminal build outcome must allow the required time. The stream still has its
 configured total deadline. This option does not add asynchronous build polling.
 
+Static deploy units return `port: null`: building static assets does not establish
+a production listening port. The networking section describes static hosting and
+any serving command actually present in the plan. Server-unit classifier ports
+are labelled as default suggestions that need runtime confirmation. Cache entries
+with the older guessed static ports are regenerated and replaced automatically.
+
 ### POST /analyze/stream
 
 Accepts the same authenticated request and returns SSE `progress` events followed by

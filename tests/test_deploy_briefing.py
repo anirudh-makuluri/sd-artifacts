@@ -1,11 +1,63 @@
 import pytest
 
 from graph.nodes.deploy_briefing import (
+    _build_briefing_prompt,
     _parse_llm_briefing,
     build_deterministic_briefing,
     deploy_briefing_node,
     validate_briefing_markdown,
 )
+
+
+def _static_state(start_command=None):
+    deploy = {"startCommand": start_command} if start_command else {}
+    return {"deploy_shape": "static_build", "deploy_units": [{
+        "name": "web", "root": "apps/web", "type": "static_build", "framework": "vite",
+        "port": 3000,  # Legacy metadata must not become runtime advice.
+        "artifacts": {"railpack_plan": {"steps": [], "deploy": deploy}},
+    }]}
+
+
+def test_static_briefing_prompt_discards_legacy_port_hint():
+    prompt = _build_briefing_prompt(_static_state())
+    assert "3000" not in prompt
+    assert '"port": null' in prompt
+    assert "Development-server and preview ports are not production" in prompt
+
+
+def test_deterministic_static_briefing_does_not_prescribe_an_application_port():
+    briefing = build_deterministic_briefing(_static_state())
+    assert "3000" not in briefing
+    assert "static host, CDN" in briefing
+    assert "plan specifies no serving command" in briefing
+    assert "Expose the port" not in briefing
+
+
+def test_static_plan_serving_command_is_preserved_without_guessing_a_port():
+    briefing = build_deterministic_briefing(_static_state("caddy file-server --listen :8080"))
+    assert "caddy file-server --listen :8080" in briefing
+    assert "3000" not in briefing
+    assert "plan specifies no serving command" not in briefing
+
+
+def test_mixed_briefing_labels_server_port_as_a_default():
+    state = _static_state()
+    state["deploy_units"].append({"name": "api", "type": "server", "port": 8080})
+    briefing = build_deterministic_briefing(state)
+    assert "3000" not in briefing
+    assert "classifier suggests port `8080` as a default" in briefing
+    assert "confirm the application's actual listener" in briefing
+
+
+def test_llm_networking_section_is_grounded_in_plan_metadata(monkeypatch):
+    raw = "# Deploy briefing\n\n## Overview\n\nStatic app.\n\n## Ports & networking\n\nExpose port 3000.\n\n## Environment variables\n\nConfigure build variables."
+    monkeypatch.setattr("graph.nodes.deploy_briefing.invoke_with_retry", lambda **kwargs: (raw, 1, False))
+    out = deploy_briefing_node(_static_state())
+    assert "3000" not in out["deploy_briefing"]
+    assert "3000" not in out["llm_outputs"]["briefing"]["preview"]
+    assert "static host, CDN" in out["deploy_briefing"]
+    assert "## Environment variables" in out["deploy_briefing"]
+    assert out["llm_outputs"]["briefing"]["source"] == "llm"
 
 
 def test_deploy_briefing_unpacks_invoke_with_retry_tuple(monkeypatch):

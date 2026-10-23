@@ -58,7 +58,8 @@ def _summarize_unit_for_prompt(unit: Dict[str, Any]) -> Dict[str, Any]:
         "type": unit.get("type"),
         "provider": unit.get("provider"),
         "framework": unit.get("framework"),
-        "port": unit.get("port"),
+        "port": None if unit.get("type") in {"static", "static_build"} else unit.get("port"),
+        "port_is_verified": False,
         "railpack_target": unit.get("railpack_target"),
         "start_command": start_command,
         "commands": [{"step": step, "cmd": cmd} for step, cmd in commands[:12]],
@@ -148,6 +149,10 @@ Rules:
 - List important env vars the app or Railpack may need in production.
 - Do NOT output only env vars or a single command.
 - Do NOT wrap the whole briefing in a code fence.
+- A static/static_build unit has no inferred production listening port. Do not assign one.
+- Development-server and preview ports are not production hosting configuration.
+- Classifier ports are suggestions, not verified runtime configuration. Label them accordingly.
+- Describe a serving process only when a start command is present in the Railpack plan.
 
 Context:
 deploy_shape: {state.get("deploy_shape")}
@@ -159,6 +164,54 @@ build_status: {state.get("build_status", "unknown")}
 deploy_units:
 {json.dumps(summaries, indent=2)[:10000]}
 """
+
+
+def _networking_markdown(units: List[Dict[str, Any]]) -> str:
+    """Render networking from known deployment metadata, without invented ports."""
+    lines = ["## Ports & networking", ""]
+    for unit in units:
+        artifacts = unit.get("artifacts") if isinstance(unit.get("artifacts"), dict) else {}
+        start_command, _commands = _extract_plan_commands(artifacts.get("railpack_plan"))
+        name = unit.get("name", "app")
+        lines.append(f"**{name}**")
+        if unit.get("type") in {"static", "static_build"}:
+            lines.append(
+                "Static assets do not establish an application listening port. "
+                "Development and preview server ports are not production hosting settings."
+            )
+            if start_command:
+                lines.append(
+                    f"The plan supplies the serving command `{start_command}`. "
+                    "Determine its listening port from that process and its hosting configuration."
+                )
+            else:
+                lines.append(
+                    "The plan specifies no serving command. Serve the generated assets with "
+                    "a static host, CDN, or configured file server; that host controls HTTPS and listening ports."
+                )
+        else:
+            if unit.get("port") is not None:
+                lines.append(
+                    f"The classifier suggests port `{unit['port']}` as a default; "
+                    "confirm the application's actual listener before configuring routing and health checks."
+                )
+            if start_command:
+                lines.append(f"Plan start command: `{start_command}`.")
+            else:
+                lines.append("The plan does not specify a start command; confirm the runtime configuration.")
+        lines.append("")
+    return "\n".join(lines).rstrip()
+
+
+def _ground_networking(briefing: str, units: List[Dict[str, Any]]) -> str:
+    section = _networking_markdown(units)
+    pattern = r"^## Ports & networking[^\n]*\n.*?(?=^## |\Z)"
+    if re.search(pattern, briefing, flags=re.MULTILINE | re.DOTALL | re.IGNORECASE):
+        return re.sub(
+            pattern, lambda _match: section + "\n\n", briefing,
+            flags=re.MULTILINE | re.DOTALL | re.IGNORECASE,
+        ).strip()
+    return briefing.rstrip() + "\n\n" + section
 
 
 def build_deterministic_briefing(state: Dict[str, Any]) -> str:
@@ -207,8 +260,8 @@ def build_deterministic_briefing(state: Dict[str, Any]) -> str:
                 meta += f", {framework}"
             meta += ")"
             lines.append(meta)
-            if port is not None:
-                lines.append(f"- **Port:** {port}")
+            if port is not None and unit_type not in {"static", "static_build"}:
+                lines.append(f"- **Suggested port (classifier default):** {port}")
             if target.get("is_workspace"):
                 lines.append(
                     f"- **Monorepo:** builds from repo root with "
@@ -231,10 +284,7 @@ def build_deterministic_briefing(state: Dict[str, Any]) -> str:
 
     lines.extend(
         [
-            "## Ports & networking",
-            "",
-            "Expose the port listed for each deploy unit. Configure your platform health checks "
-            "against the app start command above.",
+            _networking_markdown(units),
             "",
             "## Environment variables",
             "",
@@ -316,5 +366,8 @@ def deploy_briefing_node(state: Dict[str, Any]) -> Dict[str, Any]:
             briefing = build_deterministic_briefing(state)
             llm_outputs.setdefault("briefing", {})["source"] = "deterministic"
 
+        briefing = _ground_networking(briefing, [unit for unit in units if isinstance(unit, dict)])
+        if "preview" in llm_outputs.get("briefing", {}):
+            llm_outputs["briefing"]["preview"] = briefing[:8000]
         state["deploy_briefing"] = briefing.strip()
         return state
