@@ -1,5 +1,8 @@
+import asyncio
 import json
+import logging
 
+import pytest
 from fastapi.testclient import TestClient
 
 import app as app_module
@@ -655,9 +658,7 @@ def test_analyze_stream_emits_cached_complete_and_backfills_fields(monkeypatch):
 
     events = _parse_sse(response.text)
     progress_nodes = [data["node"] for (name, data) in events if name == "progress"]
-    assert progress_nodes[:1] == ["scanner"]
-    assert "clone_repo" in progress_nodes
-    assert "finalize" in progress_nodes
+    assert progress_nodes == ["scanner"]
     assert events[-1][0] == "complete"
     assert events[-1][1]["commit_sha"] == "stream-sha"
     assert events[-1][1]["schema_version"] == 2
@@ -696,6 +697,174 @@ def test_analyze_stream_success_caches_and_completes(monkeypatch):
     assert fake_supabase.inserted_payloads[0]["schema_version"] == 2
     assert len(fake_supabase.response_log_payloads) == 1
     assert fake_supabase.response_log_payloads[0]["endpoint"] == "/analyze/stream"
+
+
+def test_analyze_stream_deadline_is_terminal_and_cancels_graph(monkeypatch, caplog):
+    _set_auth(monkeypatch)
+    monkeypatch.setattr(db_module, "supabase", None)
+    monkeypatch.setenv("SD_ANALYZE_STREAM_TIMEOUT_SECONDS", "0.03")
+    visited = []
+
+    async def slow_astream(_initial_state, config=None):
+        try:
+            yield {"scanner": {"commit_sha": "known-sha"}}
+            await asyncio.sleep(10)
+            visited.append("clone_repo")
+        finally:
+            visited.append("cancelled")
+
+    monkeypatch.setattr(app_module.graph, "astream", slow_astream)
+    with caplog.at_level(logging.INFO, logger="sd_artifacts.stream"):
+        response = _client().post(
+            "/analyze/stream",
+            json={"repo_url": "https://github.com/acme/repo", "github_token": "secret-input-token"},
+            headers=_auth_headers(),
+        )
+    events = _parse_sse(response.text)
+    assert [name for name, _ in events] == ["progress", "error"]
+    detail = events[-1][1]["detail"]
+    assert detail["code"] == "analysis_timeout"
+    assert detail["request_id"] == response.headers["x-request-id"]
+    assert detail["last_completed_node"] == "scanner"
+    assert detail["retryable"] is False
+    assert "build_status" not in detail
+    assert visited == ["cancelled"]
+    assert detail["request_id"] in caplog.text
+    assert "outcome=timeout" in caplog.text
+    assert "secret-input-token" not in caplog.text
+
+
+def test_analyze_stream_commit_cache_completes_without_graph_or_simulated_progress(monkeypatch):
+    _set_auth(monkeypatch)
+    monkeypatch.setenv("SD_ANALYZE_STREAM_TIMEOUT_SECONDS", "0.5")
+    fake_supabase = FakeSupabase(cache_rows=[{
+        "id": "cache-1", "repo_url": "https://github.com/acme/repo",
+        "commit_sha": "cached-sha", "package_path": "apps/web",
+        "result": _v2_graph_state(commit_sha="cached-sha", package_path="apps/web"),
+    }])
+    monkeypatch.setattr(db_module, "supabase", fake_supabase)
+
+    def unexpected_graph(*_args, **_kwargs):
+        pytest.fail("A cache hit must not start the graph")
+
+    monkeypatch.setattr(app_module.graph, "astream", unexpected_graph)
+    response = _client().post(
+        "/analyze/stream",
+        json={"repo_url": "https://github.com/acme/repo", "commit_sha": "cached-sha", "package_path": "apps/web"},
+        headers=_auth_headers(),
+    )
+    events = _parse_sse(response.text)
+    assert [name for name, _ in events] == ["complete"]
+    assert events[0][1]["commit_sha"] == "cached-sha"
+    assert len(fake_supabase.response_log_payloads) == 1
+    assert response.headers["cache-control"] == "no-cache"
+    assert response.headers["x-accel-buffering"] == "no"
+
+
+@pytest.mark.parametrize("build_status", ["passed", "failed", "skipped", "error"])
+def test_analyze_stream_preserves_terminal_build_status(monkeypatch, build_status):
+    _set_auth(monkeypatch)
+    monkeypatch.setattr(db_module, "supabase", None)
+
+    async def fake_astream(_initial_state, config=None):
+        yield {"finalize": _v2_graph_state(build_status=build_status)}
+
+    monkeypatch.setattr(app_module.graph, "astream", fake_astream)
+    response = _client().post(
+        "/analyze/stream", json={"repo_url": "https://github.com/acme/repo"}, headers=_auth_headers(),
+    )
+    events = _parse_sse(response.text)
+    assert events[-1][0] == "complete"
+    assert events[-1][1]["schema_version"] == 2
+    assert events[-1][1]["build_status"] == build_status
+
+
+@pytest.mark.parametrize("operation", ["cache_lookup", "cache_save", "response_log"])
+def test_analyze_stream_deadline_covers_blocking_storage(monkeypatch, operation):
+    import time
+
+    _set_auth(monkeypatch)
+    monkeypatch.setenv("SD_ANALYZE_STREAM_TIMEOUT_SECONDS", "0.03")
+    fake_supabase = FakeSupabase()
+    monkeypatch.setattr(db_module, "supabase", fake_supabase)
+    graph_started = []
+
+    def slow_storage(*_args, **_kwargs):
+        time.sleep(0.15)
+        return fake_supabase, _v2_graph_state()
+
+    async def fake_astream(_initial_state, config=None):
+        graph_started.append(True)
+        yield {"finalize": _v2_graph_state()}
+
+    monkeypatch.setattr(app_module.graph, "astream", fake_astream)
+    target = {"cache_lookup": "_fetch_cached_analysis", "cache_save": "_save_to_cache", "response_log": "_store_response_log"}[operation]
+    monkeypatch.setattr(app_module, target, slow_storage)
+    body = {"repo_url": "https://github.com/acme/repo"}
+    if operation == "cache_lookup":
+        body["commit_sha"] = "cached-sha"
+    response = _client().post("/analyze/stream", json=body, headers=_auth_headers())
+    events = _parse_sse(response.text)
+    assert events[-1][0] == "error"
+    detail = events[-1][1]["detail"]
+    assert detail["code"] == "analysis_timeout"
+    assert detail["elapsed_ms"] < 140
+    assert not any(name == "complete" for name, _ in events)
+    if operation == "cache_lookup":
+        assert not graph_started
+    if operation == "cache_save":
+        assert not fake_supabase.response_log_payloads
+
+
+def test_analyze_stream_requires_auth_before_starting(monkeypatch):
+    _set_auth(monkeypatch)
+    response = _client().post("/analyze/stream", json={"repo_url": "https://github.com/acme/repo"})
+    assert response.status_code == 401
+    assert "x-request-id" not in response.headers
+
+
+def test_analyze_stream_cancels_real_langgraph_between_sync_nodes(monkeypatch):
+    import threading
+    import time
+
+    from langgraph.graph import END, StateGraph
+
+    _set_auth(monkeypatch)
+    monkeypatch.setattr(db_module, "supabase", None)
+    monkeypatch.setenv("SD_ANALYZE_STREAM_TIMEOUT_SECONDS", "0.05")
+    finished = threading.Event()
+    visited = []
+
+    def slow_node(state):
+        visited.append("slow_node")
+        time.sleep(0.2)
+        finished.set()
+        return state
+
+    def next_node(state):
+        visited.append("next_node")
+        return state
+
+    workflow = StateGraph(dict)
+    workflow.add_node("scanner", lambda state: state)
+    workflow.add_node("slow_node", slow_node)
+    workflow.add_node("next_node", next_node)
+    workflow.set_entry_point("scanner")
+    workflow.add_edge("scanner", "slow_node")
+    workflow.add_edge("slow_node", "next_node")
+    workflow.add_edge("next_node", END)
+    monkeypatch.setattr(app_module, "graph", workflow.compile())
+
+    response = _client().post(
+        "/analyze/stream", json={"repo_url": "https://github.com/acme/repo"}, headers=_auth_headers(),
+    )
+    events = _parse_sse(response.text)
+    detail = events[-1][1]["detail"]
+    assert detail["code"] == "analysis_timeout"
+    assert detail["last_completed_node"] == "scanner"
+    assert detail["elapsed_ms"] < 190
+    assert finished.wait(timeout=1)
+    assert visited == ["slow_node"]
 
 
 def test_response_status_false_updates_and_deletes_cache(monkeypatch):

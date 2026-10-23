@@ -45,6 +45,27 @@ graph TD
 
 Set `"refresh": true` to bypass Supabase cache and re-run the full pipeline (scanner cache + `commit_sha` lookup). Refreshed results replace the existing cache row.
 
+### POST /analyze/stream
+
+Accepts the same authenticated request and returns SSE `progress` events followed by
+one terminal `complete` (schema-v2 analysis) or `error` event. Cache hits return the
+cached result without simulated pipeline stages or delays.
+
+The entire stream has a default **110-second** deadline, including cache reads and
+result persistence. Configure `SD_ANALYZE_STREAM_TIMEOUT_SECONDS` for consumers with
+longer deadlines. A client or proxy must allow more time than this setting; a
+120-second client deadline leaves only 10 seconds for connection and transport
+overhead. Cold analysis can exceed 120 seconds: GitHub scanning/cloning, a briefing
+with a 90-second budget, and build verification with a separate 60-second budget
+run sequentially. Those individual limits do not bound total analysis time.
+
+On deadline expiry, the terminal event has `detail.code: "analysis_timeout"`, a
+`request_id`, elapsed time, `last_completed_node`, and `retryable: false`. This is
+an analysis timeout and does not establish that the build failed. The
+`X-Request-ID` response header correlates with server timing logs. See
+[timeout and cancellation semantics](docs/retry-timeout-strategy.md#stream-deadline-and-cancellation)
+before retrying or reconnecting.
+
 ### Response (excerpt)
 
 ```json
