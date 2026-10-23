@@ -4,11 +4,12 @@ import json
 import re
 from typing import Any, Dict, List, Optional, Tuple
 
+from graph.bedrock_errors import BedrockUnavailableError, is_bedrock_unavailable
 from graph.llm_retry import invoke_with_retry
+from graph.nodes import llm_config
 from graph.nodes.llm_config import (
     FALLBACK_PROMPTS,
     RETRY_CONFIGS,
-    llm_briefing,
     strip_markdown_wrapper,
 )
 from graph.pipeline_trace import append_trace, trace_node
@@ -285,8 +286,10 @@ def deploy_briefing_node(state: Dict[str, Any]) -> Dict[str, Any]:
         llm_outputs = state.setdefault("llm_outputs", {})
 
         try:
+            if state.get("_bedrock_unavailable"):
+                raise BedrockUnavailableError()
             briefing, attempts, fallback_used = invoke_with_retry(
-                invoke_fn=lambda p: llm_briefing.invoke(p),
+                invoke_fn=lambda p: llm_config.llm_briefing.invoke(p),
                 prompt=prompt,
                 validator=_parse_llm_briefing,
                 fallback_prompt=FALLBACK_PROMPTS.get("briefing"),
@@ -300,9 +303,14 @@ def deploy_briefing_node(state: Dict[str, Any]) -> Dict[str, Any]:
                 "preview": briefing[:8000],
             }
         except Exception as exc:
-            state.setdefault("errors", []).append(f"deploy_briefing LLM failed: {exc}")
-            llm_outputs["briefing"] = {"source": "deterministic", "llm_error": str(exc)}
-            append_trace(state, "deploy_briefing", "fallback", error=str(exc))
+            if is_bedrock_unavailable(exc):
+                state["_bedrock_unavailable"] = True
+                llm_outputs["briefing"] = {"source": "deterministic"}
+                append_trace(state, "deploy_briefing", "fallback", meta={"source": "deterministic"})
+            else:
+                state.setdefault("errors", []).append(f"deploy_briefing LLM failed: {exc}")
+                llm_outputs["briefing"] = {"source": "deterministic", "llm_error": str(exc)}
+                append_trace(state, "deploy_briefing", "fallback", error=str(exc))
 
         if not briefing or not briefing.strip():
             briefing = build_deterministic_briefing(state)

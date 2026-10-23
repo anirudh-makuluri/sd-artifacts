@@ -4,6 +4,7 @@ import re
 from dotenv import load_dotenv
 from langchain_core.callbacks import BaseCallbackHandler
 
+from graph.bedrock_errors import BedrockUnavailableError, is_bedrock_unavailable
 from graph.llm_retry import RetryConfig
 
 try:
@@ -26,7 +27,7 @@ def __getattr__(name: str):
         if ChatBedrock is None:
             class _MissingBedrockClient:
                 def invoke(self, *_args, **_kwargs):
-                    raise RuntimeError("langchain_aws is required for Bedrock-backed generation")
+                    raise BedrockUnavailableError("Optional Bedrock client is unavailable")
 
                 def with_structured_output(self, *_args, **_kwargs):
                     return self
@@ -34,10 +35,16 @@ def __getattr__(name: str):
             instance = _MissingBedrockClient()
             globals()[name] = instance
             return instance
-        instance = ChatBedrock(
-            model_id=BEDROCK_MODEL_ID,
-            model_kwargs={"temperature": _LLM_TEMPERATURES[name], "max_tokens": 4096},
-        )
+        try:
+            instance = ChatBedrock(
+                model_id=BEDROCK_MODEL_ID,
+                model_kwargs={"temperature": _LLM_TEMPERATURES[name], "max_tokens": 4096},
+            )
+        except Exception as exc:
+            # Constructor validation is configuration failure, not model output parsing.
+            if isinstance(exc, ValueError) or is_bedrock_unavailable(exc):
+                raise BedrockUnavailableError("Optional Bedrock configuration is unavailable") from None
+            raise
         globals()[name] = instance
         return instance
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
