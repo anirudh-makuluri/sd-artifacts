@@ -10,9 +10,9 @@ from graph.nodes import llm_config
 from graph.nodes.llm_config import (
     FALLBACK_PROMPTS,
     RETRY_CONFIGS,
-    strip_markdown_wrapper,
 )
 from graph.pipeline_trace import append_trace, trace_node
+from services.briefing_policy import is_complete_briefing
 
 
 def _extract_plan_commands(plan: Optional[Dict[str, Any]]) -> Tuple[Optional[str], List[Tuple[str, str]]]:
@@ -114,13 +114,18 @@ def _parse_llm_briefing(raw: Any) -> str:
     content = raw.content if hasattr(raw, "content") else str(raw)
     content = content.strip()
 
-    fenced_md = re.search(r"```(?:markdown|md)\s*\n(.*?)```", content, re.DOTALL | re.IGNORECASE)
-    if fenced_md:
-        content = fenced_md.group(1).strip()
-    elif "```" in content and "#" in content:
-        content = strip_markdown_wrapper(content, lang="markdown")
-    elif not content.startswith("#"):
-        content = strip_markdown_wrapper(content, lang="markdown")
+    # Only unwrap a whole document. Internal command fences belong to the briefing.
+    if not content.startswith("#"):
+        outer = re.fullmatch(r"```(?:markdown|md)?[ \t]*\n(.*)\n```", content, re.DOTALL | re.IGNORECASE)
+        if outer:
+            content = outer.group(1).strip()
+        else:
+            heading = re.search(r"^# Deploy briefing\b", content, re.MULTILINE | re.IGNORECASE)
+            if heading:
+                prefix = content[:heading.start()]
+                content = content[heading.start():].strip()
+                if re.search(r"```(?:markdown|md)?\s*$", prefix, re.IGNORECASE) and content.endswith("```"):
+                    content = content[:-3].rstrip()
 
     if not content.startswith("#"):
         content = f"# Deploy briefing\n\n{content}"
@@ -365,6 +370,10 @@ def deploy_briefing_node(state: Dict[str, Any]) -> Dict[str, Any]:
         if not briefing or not briefing.strip():
             briefing = build_deterministic_briefing(state)
             llm_outputs.setdefault("briefing", {})["source"] = "deterministic"
+
+        if not is_complete_briefing(briefing):
+            briefing = build_deterministic_briefing(state)
+            llm_outputs["briefing"] = {"source": "deterministic"}
 
         briefing = _ground_networking(briefing, [unit for unit in units if isinstance(unit, dict)])
         if "preview" in llm_outputs.get("briefing", {}):
