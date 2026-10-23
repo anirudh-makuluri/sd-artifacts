@@ -823,6 +823,97 @@ def test_analyze_stream_requires_auth_before_starting(monkeypatch):
     assert "x-request-id" not in response.headers
 
 
+@pytest.mark.parametrize("endpoint", ["/analyze", "/analyze/stream"])
+@pytest.mark.parametrize("verify_build", [False, True])
+def test_analysis_build_verification_is_opt_in(monkeypatch, tmp_path, endpoint, verify_build):
+    from langgraph.graph import END, StateGraph
+
+    from graph.nodes.finalize import finalize_node
+    from graph.nodes.railpack_build_repair import railpack_build_repair_node
+
+    _set_auth(monkeypatch)
+    monkeypatch.setattr(db_module, "supabase", None)
+    builds = []
+    plan = {"steps": [{"name": "build", "commands": [{"cmd": "npm run build"}]}]}
+
+    def prepare(state):
+        state.update(_v2_graph_state(build_status="not_run", deploy_briefing="Prepared deployment briefing"))
+        state["repo_dir"] = str(tmp_path)
+        state["deploy_units"][0]["artifacts"] = {"railpack_plan": plan}
+        return state
+
+    def remote_build(state):
+        builds.append(True)
+        assert verify_build, "Default analysis must never start a remote build"
+        state["build_status"] = "passed"
+        state["build_verification"] = {"backend": "aws_codebuild_railpack", "status": "passed"}
+        return state
+
+    monkeypatch.setattr("graph.nodes.railpack_build_repair.run_remote_railpack_builds", remote_build)
+    workflow = StateGraph(dict)
+    workflow.add_node("prepare", prepare)
+    workflow.add_node("railpack_build_repair", railpack_build_repair_node)
+    workflow.add_node("finalize", finalize_node)
+    workflow.set_entry_point("prepare")
+    workflow.add_edge("prepare", "railpack_build_repair")
+    workflow.add_edge("railpack_build_repair", "finalize")
+    workflow.add_edge("finalize", END)
+    monkeypatch.setattr(app_module, "graph", workflow.compile())
+    body = {"repo_url": "https://github.com/anirudh-makuluri/capora", "package_path": "apps/web", "max_files": 20, "refresh": False}
+    if verify_build:
+        body["verify_build"] = True
+    response = _client().post(endpoint, json=body, headers=_auth_headers())
+    assert response.status_code == 200
+    if endpoint.endswith("/stream"):
+        events = _parse_sse(response.text)
+        assert events[-1][0] == "complete"
+        payload = events[-1][1]
+    else:
+        payload = response.json()
+    assert payload["deploy_units"][0]["artifacts"]["railpack_plan"] == plan
+    assert payload["deploy_briefing"].startswith("Prepared deployment briefing")
+    if not verify_build:
+        assert "no build was started" in payload["deploy_briefing"]
+    assert payload["errors"] == []
+    assert payload["build_status"] == ("passed" if verify_build else "skipped")
+    assert payload["build_verification"]["requested"] is verify_build
+    assert builds == ([True] if verify_build else [])
+
+
+@pytest.mark.parametrize("endpoint", ["/analyze", "/analyze/stream"])
+def test_verified_request_replaces_plan_only_cache(monkeypatch, endpoint):
+    _set_auth(monkeypatch)
+    plan_only = _v2_graph_state(
+        build_status="skipped", build_verification={"requested": False, "status": "skipped"},
+    )
+    fake_supabase = FakeSupabase(cache_rows=[{
+        "id": "cache-1", "repo_url": "https://github.com/acme/repo", "commit_sha": "sha-1",
+        "package_path": ".", "result": plan_only,
+    }])
+    monkeypatch.setattr(db_module, "supabase", fake_supabase)
+    invoked = []
+
+    def invoke(initial_state, config=None):
+        assert initial_state["verify_build"] is True
+        invoked.append(True)
+        return _v2_graph_state()
+
+    async def astream(initial_state, config=None):
+        yield {"finalize": invoke(initial_state, config)}
+
+    monkeypatch.setattr(app_module.graph, "invoke", invoke)
+    monkeypatch.setattr(app_module.graph, "astream", astream)
+    response = _client().post(endpoint, json={
+        "repo_url": "https://github.com/acme/repo", "commit_sha": "sha-1", "verify_build": True,
+    }, headers=_auth_headers())
+    payload = _parse_sse(response.text)[-1][1] if endpoint.endswith("/stream") else response.json()
+    assert payload["build_status"] == "passed"
+    assert invoked == [True]
+    assert len(fake_supabase.cache_rows) == 1
+    assert fake_supabase.cache_rows[0]["result"]["build_status"] == "passed"
+    assert len(fake_supabase.upserted_payloads) == 1
+
+
 def test_analyze_stream_cancels_real_langgraph_between_sync_nodes(monkeypatch):
     import threading
     import time

@@ -2,14 +2,14 @@
 
 SD-Artifacts is a FastAPI service that answers: **given a GitHub `repo_url` and `package_path`, how do we deploy it?**
 
-It uses **Railpack** to generate verified build plans, **LangGraph** to orchestrate the pipeline, and **Bedrock LLMs** for deploy briefings and autonomous build repair — not for writing Dockerfiles or compose files.
+It uses **Railpack** to generate build plans, **LangGraph** to orchestrate the pipeline, and **Bedrock LLMs** for deploy briefings and optional build repair — not for writing Dockerfiles or compose files.
 
 ## What It Does
 
 - Scans public or private GitHub repositories (scoped to `package_path`).
 - Classifies deploy shape: static, Vite/static build, server app, or multi-package workspace.
-- Runs `railpack prepare` → `railpack build` with AI repair loop (max 3 attempts per unit), or remote CodeBuild verification that pushes images to ECR.
-- Returns verified `railpack_plan` JSON + human-readable `deploy_briefing` for [smart-deploy.xyz](https://smart-deploy.xyz).
+- Runs `railpack prepare`; build verification is opt-in with `verify_build: true`.
+- Returns `railpack_plan` JSON + human-readable `deploy_briefing` for [smart-deploy.xyz](https://smart-deploy.xyz), with an honest build-verification status.
 - Caches results in Supabase (`repo_url + commit_sha + package_path`, schema v2).
 - Full audit trail: `pipeline_trace`, `repair_history`, `build_status`.
 
@@ -23,7 +23,10 @@ graph TD
     Clone --> Classify["Classifier"]
     Classify --> Prepare["Railpack prepare"]
     Prepare --> Briefing["AI deploy briefing"]
-    Briefing --> Build["Railpack build + AI repair"]
+    Briefing --> Verification{"verify_build?"}
+    Verification -->|true| Build["Railpack build + AI repair"]
+    Verification -->|false| Skipped["Mark verification skipped"]
+    Skipped --> Finalize
     Build --> Finalize["Finalize"]
     Finalize --> End
 ```
@@ -39,11 +42,24 @@ graph TD
   "github_token": "optional",
   "max_files": 50,
   "commit_sha": "optional-cache-lookup",
-  "refresh": false
+  "refresh": false,
+  "verify_build": false
 }
 ```
 
 Set `"refresh": true` to bypass Supabase cache and re-run the full pipeline (scanner cache + `commit_sha` lookup). Refreshed results replace the existing cache row.
+
+Analysis defaults to **preparing a plan without executing a build**. The response
+includes the plan and briefing, `build_status: "skipped"`, and
+`build_verification: {"requested": false, "status": "skipped", ...}`. No local or
+remote build is started. A previously verified cache result may still be reused
+with its actual build status.
+
+Set `"verify_build": true` to run build verification. These requests ignore
+cache entries whose verification was not requested, and replace them with the new
+result. Verification can outlast a short client's deadline; callers requiring a
+terminal build outcome must allow the required time. The stream still has its
+configured total deadline. This option does not add asynchronous build polling.
 
 ### POST /analyze/stream
 
@@ -55,9 +71,10 @@ The entire stream has a default **110-second** deadline, including cache reads a
 result persistence. Configure `SD_ANALYZE_STREAM_TIMEOUT_SECONDS` for consumers with
 longer deadlines. A client or proxy must allow more time than this setting; a
 120-second client deadline leaves only 10 seconds for connection and transport
-overhead. Cold analysis can exceed 120 seconds: GitHub scanning/cloning, a briefing
-with a 90-second budget, and build verification with a separate 60-second budget
-run sequentially. Those individual limits do not bound total analysis time.
+overhead. With `verify_build: true`, cold analysis can exceed 120 seconds: GitHub
+scanning/cloning, a briefing with a 90-second budget, and build verification with
+a separate 60-second budget run sequentially. Default analysis omits the build
+stage. Individual stage limits do not bound total analysis time.
 
 On deadline expiry, the terminal event has `detail.code: "analysis_timeout"`, a
 `request_id`, elapsed time, `last_completed_node`, and `retryable: false`. This is
@@ -71,7 +88,8 @@ before retrying or reconnecting.
 ```json
 {
   "schema_version": 2,
-  "build_status": "passed",
+  "build_status": "skipped",
+  "build_verification": { "requested": false, "status": "skipped" },
   "deploy_shape": "static_build",
   "deploy_units": [{
     "name": "web",

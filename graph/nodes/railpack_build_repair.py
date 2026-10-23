@@ -174,6 +174,24 @@ def railpack_build_repair_node(state: Dict[str, Any]) -> Dict[str, Any]:
         if state.get("error"):
             return state
 
+        if not state.get("verify_build", True):
+            state["build_status"] = "skipped"
+            state["build_verification"] = {
+                "requested": False,
+                "backend": "railpack",
+                "status": "skipped",
+                "message": "Build verification was not requested. Set verify_build=true to run a build.",
+                "attempts": 0,
+                "duration_seconds": 0.0,
+                "log_excerpt": "",
+            }
+            if state.get("deploy_briefing"):
+                state["deploy_briefing"] = state["deploy_briefing"].rstrip() + (
+                    "\n\nBuild verification was not requested; no build was started for this analysis."
+                )
+            append_trace(state, "railpack_build_repair", "skipped", meta={"reason": "not_requested"})
+            return state
+
         repo_dir = state.get("repo_dir")
         if not repo_dir or not os.path.isdir(repo_dir):
             state["error"] = "Missing repo_dir; cannot run builds."

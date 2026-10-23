@@ -23,6 +23,7 @@ from models.schemas import (
     RepairAttempt,
     TokenUsage,
 )
+from services.cache_policy import satisfies_build_request
 from services.streaming import bounded_analysis_events, stream_timeout_seconds
 from tools.path_utils import normalize_package_path
 from tools.railpack_tools import get_railpack_version
@@ -46,6 +47,7 @@ class AnalyzeRequest(BaseModel):
     package_path: str = "."
     commit_sha: Optional[str] = None
     refresh: bool = False
+    verify_build: bool = False
 
 
 class DeleteCacheRequest(BaseModel):
@@ -201,6 +203,8 @@ def _fetch_cached_analysis(
     repo_url: str,
     commit_sha: str,
     package_path: str = ".",
+    *,
+    verify_build: bool = False,
 ):
     from db import supabase
 
@@ -225,7 +229,10 @@ def _fetch_cached_analysis(
         )
 
     cached_result = existing.data.get("result") if existing.data else None
-    if not cached_result or not _is_v2_cache_result(cached_result):
+    if (
+        not cached_result or not _is_v2_cache_result(cached_result)
+        or not satisfies_build_request(cached_result, verify_build)
+    ):
         raise HTTPException(
             status_code=404,
             detail=f"No cached v2 analysis found for {repo_url}@{commit_sha}",
@@ -303,6 +310,7 @@ def _graph_initial_state(req: AnalyzeRequest) -> Dict[str, Any]:
         "github_token": req.github_token,
         "max_files": req.max_files,
         "package_path": req.package_path,
+        "verify_build": req.verify_build,
     }
     if req.refresh:
         state["_skip_cache"] = True
@@ -343,6 +351,7 @@ async def analyze_repo(req: AnalyzeRequest, authorization: Optional[str] = Heade
                 repo_url=req.repo_url,
                 commit_sha=req.commit_sha,
                 package_path=req.package_path,
+                verify_build=req.verify_build,
             )
             cached_payload = dict(cached_result)
             cached_payload.setdefault("commit_sha", req.commit_sha)
@@ -402,7 +411,7 @@ async def analyze_repo(req: AnalyzeRequest, authorization: Optional[str] = Heade
                 package_path=req.package_path,
                 response_id=response_id,
             ),
-            replace=req.refresh,
+            replace=req.refresh or req.verify_build,
         )
 
     response_payload = response.model_dump()
@@ -540,7 +549,7 @@ async def analyze_repo_stream(req: AnalyzeRequest, authorization: Optional[str] 
                         package_path=req.package_path,
                         response_id=response_id,
                     ),
-                    replace=req.refresh,
+                    replace=req.refresh or req.verify_build,
                 )
 
             final_dict = response.model_dump()
@@ -571,6 +580,7 @@ async def analyze_repo_stream(req: AnalyzeRequest, authorization: Optional[str] 
                     repo_url=req.repo_url,
                     commit_sha=req.commit_sha,
                     package_path=req.package_path,
+                    verify_build=req.verify_build,
                 )
                 cached_payload = dict(cached_result)
                 cached_payload.setdefault("commit_sha", req.commit_sha)
