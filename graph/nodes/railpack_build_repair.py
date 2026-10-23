@@ -7,6 +7,7 @@ from typing import Any, Dict, List, Optional
 
 from pydantic import BaseModel, Field
 
+from graph.bedrock_errors import BedrockUnavailableError, is_bedrock_unavailable
 from graph.llm_retry import invoke_with_retry
 from graph.pipeline_trace import append_trace, trace_node
 from tools.path_utils import normalize_package_path
@@ -108,10 +109,12 @@ attempt_history:
 
 
 def _invoke_repair_llm(state: Dict[str, Any], prompt: str) -> RailpackRepairPatch:
+    if state.get("_bedrock_unavailable"):
+        raise BedrockUnavailableError()
+    from graph.nodes import llm_config
     from graph.nodes.llm_config import (
         FALLBACK_PROMPTS,
         RETRY_CONFIGS,
-        llm_repair,
         strip_markdown_wrapper,
     )
 
@@ -125,7 +128,7 @@ def _invoke_repair_llm(state: Dict[str, Any], prompt: str) -> RailpackRepairPatc
         raise ValueError("Unexpected LLM response format")
 
     patch, _attempts, _fallback_used = invoke_with_retry(
-        invoke_fn=lambda p: llm_repair.invoke(p),
+        invoke_fn=lambda p: llm_config.llm_repair.invoke(p),
         prompt=prompt,
         validator=_validate,
         fallback_prompt=FALLBACK_PROMPTS.get("repair"),
@@ -328,10 +331,14 @@ def railpack_build_repair_node(state: Dict[str, Any]) -> Dict[str, Any]:
                 try:
                     patch = _invoke_repair_llm(state, prompt)
                 except Exception as exc:
+                    unavailable = is_bedrock_unavailable(exc)
+                    if unavailable:
+                        state["_bedrock_unavailable"] = True
+                        state.setdefault("llm_outputs", {})["repair"] = {"source": "skipped"}
                     repair_history.append({
                         "attempt": attempt,
                         "unit_name": unit_name,
-                        "diagnosis": f"Repair LLM failed: {exc}",
+                        "diagnosis": "Automatic repair skipped." if unavailable else f"Repair LLM failed: {exc}",
                         "patch": {},
                         "build_log_excerpt": last_logs,
                         "build_exit_code": exit_code,

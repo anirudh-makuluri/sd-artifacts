@@ -8,6 +8,8 @@ from typing import Any, Callable, Optional, Tuple
 
 from pydantic import ValidationError
 
+from graph.bedrock_errors import is_bedrock_unavailable
+
 
 @dataclass(frozen=True)
 class RetryConfig:
@@ -39,6 +41,8 @@ def _looks_non_retryable(exc: Exception) -> bool:
 
 
 def _is_retryable_exception(exc: Exception) -> bool:
+    if is_bedrock_unavailable(exc):
+        return False
     if isinstance(exc, (ValidationError, JSONDecodeError, TimeoutError)):
         return True
     if _looks_non_retryable(exc):

@@ -69,7 +69,7 @@ Set `"refresh": true` to bypass Supabase cache and re-run the full pipeline (sca
 
 - Python 3.10+
 - GitHub token (private repos / rate limits)
-- Amazon Bedrock credentials
+- Amazon Bedrock credentials (optional; enables AI briefings and build repair)
 - Supabase (cache + audit log)
 - **Railpack CLI** + Docker/BuildKit on the host for local build verification, unless remote CodeBuild builds are enabled
 - `SD_API_BEARER_TOKEN` for API auth
@@ -84,6 +84,15 @@ pip install -r requirements.txt
 ```
 
 Apply Supabase schema: `supabase_schema.sql` (fresh) or `migrations/v2_schema.sql` (upgrade).
+
+Bedrock is optional. Missing/invalid credentials, denied model access, and invalid
+region/model configuration quietly use a deterministic deployment briefing from
+the Railpack plan. These setup failures do not add API errors or expose provider
+exception details. AI repair is skipped for the rest of that request; a failed
+build still reports its actual failure and build logs. Later requests can try
+Bedrock again after configuration is corrected. Transient model failures retain
+their existing retry and diagnostic behavior. Existing cached analyses keep their
+stored payload until refreshed.
 
 ## Environment
 

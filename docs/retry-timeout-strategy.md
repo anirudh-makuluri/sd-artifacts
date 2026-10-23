@@ -27,6 +27,26 @@ The following v2 nodes run through shared retry logic:
 - After repeated failures, nodes switch to fallback prompts.
 - Fallback prompts prioritize output validity and minimal required fields.
 
+## Optional Bedrock configuration
+
+Bedrock clients initialize inside the guarded LLM invocation, so missing AWS
+configuration cannot prevent importing the API. Credential, region, profile,
+model-access and provider-validation failures are treated as unavailable optional
+AI configuration, without retrying the same setup failure. The response uses the
+deterministic briefing, omits raw provider errors, and skips further AI calls for
+that request. The request-scoped flag is not returned in the API response and
+does not disable later requests.
+
+If a build fails and AI repair is unavailable, the repair history records a
+generic skip while the build retains its actual failed status and logs. CodeBuild,
+S3 and other non-Bedrock failures retain their normal behavior. Throttling,
+timeouts, malformed model output and unexpected failures keep their existing
+retry/diagnostic handling.
+
+The configuration-error classification follows the documented
+[Bedrock service errors](https://docs.aws.amazon.com/bedrock/latest/APIReference/API_runtime_InvokeModel.html#API_runtime_InvokeModel_Errors)
+and [botocore credential/configuration exceptions](https://docs.aws.amazon.com/boto3/latest/guide/error-handling.html).
+
 ## Configuration Location
 
 Current defaults are defined in:
